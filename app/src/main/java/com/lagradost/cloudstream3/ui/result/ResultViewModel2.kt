@@ -1640,7 +1640,8 @@ class ResultViewModel2 : ViewModel() {
                     acquireSingleLink(
                         click.data,
                         action.sourceTypes,
-                        action.name
+                        action.name,
+                        isCasting = action.isCasting,
                     ) { (result, index) ->
                         action.runActionSafe(
                             activity,
@@ -1650,7 +1651,12 @@ class ResultViewModel2 : ViewModel() {
                         )
                     }
                 } else {
-                    loadLinks(click.data, isVisible = true, action.sourceTypes) { links ->
+                    loadLinks(
+                        click.data,
+                        isVisible = true,
+                        sourceTypes = action.sourceTypes,
+                        isCasting = action.isCasting,
+                    ) { links ->
                         action.runActionSafe(
                             activity,
                             click.data,

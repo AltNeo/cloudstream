@@ -1,5 +1,6 @@
 package com.lagradost.cloudstream3.ui.settings
 
+import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import android.view.View
@@ -17,6 +18,7 @@ import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.databinding.MainSettingsBinding
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.mvvm.safe
+import com.lagradost.cloudstream3.remote.RemoteControlActivity
 import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.syncproviders.AuthRepo
 import com.lagradost.cloudstream3.ui.BaseFragment
@@ -244,6 +246,11 @@ class SettingsFragment : BaseFragment<MainSettingsBinding>(
             // Default focus on TV
             if (isLayout(TV)) {
                 settingsGeneral.requestFocus()
+                settingsRemote.visibility = View.GONE
+            } else {
+                settingsRemote.setOnClickListener {
+                    startActivity(Intent(requireContext(), RemoteControlActivity::class.java))
+                }
             }
         }
 
