@@ -144,28 +144,30 @@ object NowPlayingHub {
     // ------------------------------------------------------------------
 
     fun routeCommand(cmd: PlayerCmdPayload) {
-        val target = synchronized(lock) { player }
-        when (cmd.action) {
-            PlayerCmdPayload.Action.PAUSE -> target?.handleEvent(CSPlayerEvent.Pause)
-            PlayerCmdPayload.Action.RESUME -> target?.handleEvent(CSPlayerEvent.Play)
-            PlayerCmdPayload.Action.PLAY_PAUSE -> target?.handleEvent(CSPlayerEvent.PlayPauseToggle)
-            PlayerCmdPayload.Action.SEEK_TO -> cmd.positionMs?.let { target?.seekTo(it) }
-            PlayerCmdPayload.Action.SEEK_BY -> cmd.deltaMs?.let { delta ->
-                target?.getPosition()?.let { target.seekTo((it + delta).coerceAtLeast(0L)) }
-            }
-            PlayerCmdPayload.Action.SET_SPEED -> cmd.speed?.let { target?.setPlaybackSpeed(it) }
-            PlayerCmdPayload.Action.STOP -> mainHandler.post {
-                val activity = CommonActivity.activity
-                if (activity is androidx.activity.ComponentActivity) {
-                    activity.onBackPressedDispatcher.onBackPressed()
-                } else {
-                    @Suppress("DEPRECATION")
-                    activity?.onBackPressed()
+        mainHandler.post {
+            val target = synchronized(lock) { player }
+            when (cmd.action) {
+                PlayerCmdPayload.Action.PAUSE -> target?.handleEvent(CSPlayerEvent.Pause)
+                PlayerCmdPayload.Action.RESUME -> target?.handleEvent(CSPlayerEvent.Play)
+                PlayerCmdPayload.Action.PLAY_PAUSE -> target?.handleEvent(CSPlayerEvent.PlayPauseToggle)
+                PlayerCmdPayload.Action.SEEK_TO -> cmd.positionMs?.let { target?.seekTo(it) }
+                PlayerCmdPayload.Action.SEEK_BY -> cmd.deltaMs?.let { delta ->
+                    target?.getPosition()?.let { target.seekTo((it + delta).coerceAtLeast(0L)) }
                 }
+                PlayerCmdPayload.Action.SET_SPEED -> cmd.speed?.let { target?.setPlaybackSpeed(it) }
+                PlayerCmdPayload.Action.STOP -> {
+                    val activity = CommonActivity.activity
+                    if (activity is androidx.activity.ComponentActivity) {
+                        activity.onBackPressedDispatcher.onBackPressed()
+                    } else {
+                        @Suppress("DEPRECATION")
+                        activity?.onBackPressed()
+                    }
+                }
+                PlayerCmdPayload.Action.VOLUME_UP -> adjustVolume(AudioManager.ADJUST_RAISE)
+                PlayerCmdPayload.Action.VOLUME_DOWN -> adjustVolume(AudioManager.ADJUST_LOWER)
+                PlayerCmdPayload.Action.MUTE -> adjustVolume(AudioManager.ADJUST_TOGGLE_MUTE)
             }
-            PlayerCmdPayload.Action.VOLUME_UP -> adjustVolume(AudioManager.ADJUST_RAISE)
-            PlayerCmdPayload.Action.VOLUME_DOWN -> adjustVolume(AudioManager.ADJUST_LOWER)
-            PlayerCmdPayload.Action.MUTE -> adjustVolume(AudioManager.ADJUST_TOGGLE_MUTE)
         }
     }
 
