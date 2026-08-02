@@ -81,22 +81,31 @@ class LanRemoteProtocolTest {
     }
 
     @Test
-    fun `live tv survives malformed client and responds to ping`() {
+    fun `live tv survives malformed client and enforces the v1 upgrade-required policy`() {
         val host = System.getenv("LAN_REMOTE_TV").orEmpty()
         assumeTrue("LAN_REMOTE_TV was not set", host.isNotBlank())
 
         Socket(host, LanRemoteProtocol.PORT).use { }
         Thread.sleep(300)
 
-        val requests = listOf(
-            LanRemoteRequest(requestId = "live-ping-1", command = LanRemoteCommand.PING),
-            LanRemoteRequest(requestId = "live-ping-2", command = LanRemoteCommand.PING),
+        // v1 PING keeps the legacy answer.
+        Socket(host, LanRemoteProtocol.PORT).use { socket ->
+            socket.soTimeout = 5_000
+            LanRemoteProtocol.write(
+                DataOutputStream(socket.getOutputStream()),
+                LanRemoteRequest(requestId = "live-ping-1", command = LanRemoteCommand.PING),
+            )
+            val response = LanRemoteProtocol.read<LanRemoteResponse>(
+                DataInputStream(socket.getInputStream())
+            )
+            assertEquals("live-ping-1", response.requestId)
+            assertTrue(response.accepted)
+        }
+
+        // Everything else v1 is answered with accepted=false "upgrade-required" (plan §3.1).
+        val legacyRequests = listOf(
             LanRemoteRequest(requestId = "live-launch", command = LanRemoteCommand.LAUNCH),
-            LanRemoteRequest(
-                requestId = "live-dpad-down",
-                command = LanRemoteCommand.KEY,
-                keyCode = 20,
-            ),
+            LanRemoteRequest(requestId = "live-dpad-down", command = LanRemoteCommand.KEY, keyCode = 20),
             LanRemoteRequest(
                 requestId = "live-play",
                 command = LanRemoteCommand.PLAY,
@@ -115,7 +124,7 @@ class LanRemoteProtocolTest {
                 ),
             ),
         )
-        requests.forEach { request ->
+        legacyRequests.forEach { request ->
             Socket(host, LanRemoteProtocol.PORT).use { socket ->
                 socket.soTimeout = 5_000
                 LanRemoteProtocol.write(DataOutputStream(socket.getOutputStream()), request)
@@ -123,7 +132,8 @@ class LanRemoteProtocolTest {
                     DataInputStream(socket.getInputStream())
                 )
                 assertEquals(request.requestId, response.requestId)
-                assertTrue(response.accepted)
+                assertEquals(false, response.accepted)
+                assertEquals("upgrade-required", response.message)
             }
         }
     }

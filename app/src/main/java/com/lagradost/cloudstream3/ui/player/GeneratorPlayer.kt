@@ -133,6 +133,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import com.lagradost.cloudstream3.remote.server.PlaybackReporter
 import java.io.Serializable
 import java.lang.ref.WeakReference
 import java.util.Calendar
@@ -1716,6 +1717,7 @@ class GeneratorPlayer : FullScreenPlayer() {
     override fun onDestroy() {
         ResultFragment.updateUI()
         currentVerifyLink?.cancel()
+        PlaybackReporter.unregisterPlayer()
         super.onDestroy()
     }
 
@@ -1751,6 +1753,11 @@ class GeneratorPlayer : FullScreenPlayer() {
             currentMeta,
             nextMeta
         )
+
+        // Companion: throttled now-playing state for subscribed phones (plan §6.3).
+        runCatching {
+            PlaybackReporter.reportState(position, duration, PlaybackReporter.playingState(player))
+        }
 
         var isOpVisible = false
         when (val meta = currentMeta) {
@@ -2222,6 +2229,7 @@ class GeneratorPlayer : FullScreenPlayer() {
     }
 
     fun exitPlayer() {
+        PlaybackReporter.unregisterPlayer()
         playerHostView?.exitFullscreen()
         player.release()
         activity?.popCurrentPage()
@@ -2251,6 +2259,9 @@ class GeneratorPlayer : FullScreenPlayer() {
             return
         }
         viewModel.attachGenerator(generator, index)
+
+        // Companion: expose the active player to the TV-side NowPlayingHub (plan §6.3).
+        runCatching { PlaybackReporter.registerPlayer(player) }
 
         context?.let { ctx ->
             val settingsManager = PreferenceManager.getDefaultSharedPreferences(ctx)

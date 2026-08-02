@@ -19,6 +19,7 @@ import com.lagradost.cloudstream3.databinding.MainSettingsBinding
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.mvvm.safe
 import com.lagradost.cloudstream3.remote.RemoteControlActivity
+import com.lagradost.cloudstream3.remote.ui.CompanionSettingsActivity
 import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.syncproviders.AuthRepo
 import com.lagradost.cloudstream3.ui.BaseFragment
@@ -246,11 +247,19 @@ class SettingsFragment : BaseFragment<MainSettingsBinding>(
             // Default focus on TV
             if (isLayout(TV)) {
                 settingsGeneral.requestFocus()
-                settingsRemote.visibility = View.GONE
-            } else {
-                settingsRemote.setOnClickListener {
-                    startActivity(Intent(requireContext(), RemoteControlActivity::class.java))
-                }
+            }
+            // The Companion settings row is reachable on both phone and TV: on a TV it
+            // opens the TV-side view (allow-control / allow-pairing switches, paired
+            // phones, unpair) per plan §10 (review runtime #5).
+            settingsRemote.visibility = View.VISIBLE
+            settingsRemote.setOnClickListener {
+                startActivity(
+                    Intent(requireContext(), CompanionSettingsActivity::class.java)
+                )
+            }
+            if (isLayout(TV)) {
+                settingsRemote.isFocusable = true
+                settingsRemote.isFocusableInTouchMode = true
             }
         }
 

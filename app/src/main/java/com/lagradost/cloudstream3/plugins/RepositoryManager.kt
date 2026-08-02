@@ -14,6 +14,7 @@ import com.lagradost.cloudstream3.mvvm.safe
 import com.lagradost.cloudstream3.mvvm.safeAsync
 import com.lagradost.cloudstream3.plugins.PluginManager.getPluginSanitizedFileName
 import com.lagradost.cloudstream3.plugins.PluginManager.unloadPlugin
+import com.lagradost.cloudstream3.remote.sync.SyncHooks
 import com.lagradost.cloudstream3.ui.settings.extensions.REPOSITORIES_KEY
 import com.lagradost.cloudstream3.ui.settings.extensions.RepositoryData
 import kotlinx.coroutines.sync.Mutex
@@ -251,6 +252,7 @@ object RepositoryManager {
             // No duplicates
             setKey(REPOSITORIES_KEY, (currentRepos + repository).distinctBy { it.url })
         }
+        SyncHooks.onRepositoriesChanged.invoke(Unit)
     }
 
     /**
@@ -281,5 +283,6 @@ object RepositoryManager {
         }
 
         PluginManager.deleteRepositoryData(file.absolutePath)
+        SyncHooks.onRepositoriesChanged.invoke(Unit)
     }
 }

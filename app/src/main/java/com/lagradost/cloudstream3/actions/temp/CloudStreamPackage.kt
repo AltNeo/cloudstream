@@ -64,6 +64,9 @@ class CloudStreamPackage : OpenInAppAction(
         @JsonProperty("name") @SerialName("name") val name: String?,
         @JsonProperty("headers") @SerialName("headers") var headers: Map<String, String> = mapOf(),
         @JsonProperty("quality") @SerialName("quality") val quality: Int?,
+        // Provider identity (ExtractorLink.source / apiName). Lets the TV player resolve
+        // getVideoInterceptor() and extension subtitle providers for remote streams (plan §7.1).
+        @JsonProperty("source") @SerialName("source") val source: String? = null,
     ) {
         companion object {
             fun fromExtractor(link: ExtractorLink): MinimalVideoLink = MinimalVideoLink(
@@ -72,14 +75,15 @@ class CloudStreamPackage : OpenInAppAction(
                 name = link.name,
                 mimeType = link.type.getMimeType(),
                 headers = if (link.referer.isBlank()) emptyMap() else mapOf("referer" to link.referer) + link.headers,
-                quality = link.quality
+                quality = link.quality,
+                source = link.source,
             )
         }
 
         suspend fun toExtractorLink(): Pair<ExtractorLink?, ExtractorUri?> =
             url?.let { url ->
                 newExtractorLink(
-                    source = "NONE",
+                    source = source ?: "NONE",
                     name = name ?: "Unknown",
                     url = url,
                     type = ExtractorLinkType.entries.firstOrNull { ty -> ty.getMimeType() == mimeType }

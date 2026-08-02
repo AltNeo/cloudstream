@@ -1,11 +1,16 @@
 package com.lagradost.cloudstream3.remote
 
 import android.content.Context
+import com.lagradost.cloudstream3.CloudStreamApp.Companion.context as appContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.UUID
 
+/** Kept for the discovery flow; a TV the phone knows about on the LAN. */
 data class LanRemoteEndpoint(
     val name: String,
     val host: String,
@@ -13,54 +18,78 @@ data class LanRemoteEndpoint(
 )
 
 object LanRemoteClient {
-    private const val PREFS_NAME = "lan_remote"
-    private const val HOST_KEY = "selected_host"
-    private const val PORT_KEY = "selected_port"
     private const val CONNECT_TIMEOUT_MS = 2_000
     private const val READ_TIMEOUT_MS = 5_000
 
-    fun selectedEndpoint(context: Context?): LanRemoteEndpoint? {
-        context ?: return null
-        val preferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val host = preferences.getString(HOST_KEY, null)?.takeIf(String::isNotBlank)
-            ?: return null
-        val port = preferences.getInt(PORT_KEY, LanRemoteProtocol.PORT)
-        return LanRemoteEndpoint(host, host, port)
-    }
-
-    fun selectEndpoint(context: Context, endpoint: LanRemoteEndpoint) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(HOST_KEY, endpoint.host)
-            .putInt(PORT_KEY, endpoint.port)
-            .apply()
-    }
-
-    suspend fun ping(endpoint: LanRemoteEndpoint): LanRemoteResponse {
-        return send(endpoint, LanRemoteRequest(command = LanRemoteCommand.PING))
-    }
-
+    /** Signed one-shot v2 envelope to a specific paired TV. */
     suspend fun send(
-        context: Context,
-        request: LanRemoteRequest,
-    ): LanRemoteResponse {
-        val endpoint = selectedEndpoint(context)
-            ?: throw IllegalStateException("No CloudStream TV is connected")
-        return send(endpoint, request)
+        tv: PairedTv,
+        type: RemoteMessageType,
+        payload: Any? = null,
+    ): RemoteReply = withContext(Dispatchers.IO) {
+        val requestId = UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+        val envelope = RemoteEnvelope(
+            requestId = requestId,
+            deviceId = PairingManager.myDeviceId(appContext ?: throw IllegalStateException("No app context")),
+            timestampMs = now,
+            auth = RemoteAuth.sign(tv.token, requestId, now),
+            type = type,
+            payload = payload?.let { encodePayload(it) },
+        )
+        sendRaw(tv.host, tv.port, envelope)
     }
 
-    suspend fun send(
-        endpoint: LanRemoteEndpoint,
-        request: LanRemoteRequest,
-    ): LanRemoteResponse = withContext(Dispatchers.IO) {
-        Socket().use { socket ->
-            socket.soTimeout = READ_TIMEOUT_MS
-            socket.connect(InetSocketAddress(endpoint.host, endpoint.port), CONNECT_TIMEOUT_MS)
-            LanRemoteProtocol.write(
-                java.io.DataOutputStream(socket.getOutputStream()),
-                request,
-            )
-            LanRemoteProtocol.read(java.io.DataInputStream(socket.getInputStream()))
+    /** Unauthenticated send (PING / PAIR_*). */
+    suspend fun sendUnauthenticated(
+        host: String,
+        port: Int,
+        type: RemoteMessageType,
+        payload: Any? = null,
+    ): RemoteReply = withContext(Dispatchers.IO) {
+        val envelope = RemoteEnvelope(
+            requestId = UUID.randomUUID().toString(),
+            deviceId = runCatching {
+                appContext?.let { PairingManager.myDeviceId(it) } ?: ""
+            }.getOrDefault(""),
+            type = type,
+            payload = payload?.let { encodePayload(it) },
+        )
+        sendRaw(host, port, envelope)
+    }
+
+    /** v2 PING to a specific TV. */
+    suspend fun ping(tv: PairedTv): RemoteReply = send(tv, RemoteMessageType.PING)
+
+    /** v2 PING to an arbitrary host (manual entry / discovery). */
+    suspend fun ping(host: String, port: Int): RemoteReply =
+        sendUnauthenticated(host, port, RemoteMessageType.PING)
+
+    /** Uses the active TV; throws IllegalStateException when none is paired. */
+    suspend fun sendActive(type: RemoteMessageType, payload: Any? = null): RemoteReply {
+        val tv = PairingManager.getActiveTv()
+            ?: throw IllegalStateException("No CloudStream TV is paired")
+        return send(tv, type, payload)
+    }
+
+    /**
+     * Legacy `lan_remote` prefs from the v1 cut (plan §5.2): there is no token in there,
+     * so it can only seed the manual host field; the user must pair again.
+     */
+    fun legacyEndpoint(context: Context): Pair<String, Int>? {
+        val prefs = context.getSharedPreferences("lan_remote", Context.MODE_PRIVATE)
+        val host = prefs.getString("selected_host", null)?.takeIf(String::isNotBlank) ?: return null
+        val port = prefs.getInt("selected_port", LanRemoteProtocol.PORT)
+        return host to port
+    }
+
+    private suspend fun sendRaw(host: String, port: Int, envelope: RemoteEnvelope): RemoteReply =
+        withContext(Dispatchers.IO) {
+            Socket().use { socket ->
+                socket.soTimeout = READ_TIMEOUT_MS
+                socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+                LanRemoteProtocol.write(DataOutputStream(socket.getOutputStream()), envelope)
+                LanRemoteProtocol.read<RemoteReply>(DataInputStream(socket.getInputStream()))
+            }
         }
-    }
 }

@@ -11,6 +11,7 @@ import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.databinding.FragmentPluginsBinding
 import com.lagradost.cloudstream3.mvvm.observe
+import com.lagradost.cloudstream3.remote.CompanionSessionManager
 import com.lagradost.cloudstream3.ui.BaseFragment
 import com.lagradost.cloudstream3.ui.home.HomeFragment.Companion.bindChips
 import com.lagradost.cloudstream3.ui.result.FOCUS_SELF
@@ -36,8 +37,13 @@ class PluginsFragment : BaseFragment<FragmentPluginsBinding>(
     BaseFragment.BindingCreator.Inflate(FragmentPluginsBinding::inflate)
 ) {
     private lateinit var pluginViewModel: PluginsViewModel
+    private val tvSyncRefreshListener: (Unit) -> Unit = {
+        // Re-render rows so per-plugin TV sync badges pick up the latest results (plan §8.5).
+        (binding?.pluginRecyclerView?.adapter as? PluginAdapter)?.notifyDataSetChanged()
+    }
 
     override fun onDestroyView() {
+        CompanionSessionManager.syncCompletedEvent -= tvSyncRefreshListener
         pluginViewModel.clear() // clear for the next observe
         super.onDestroyView()
     }
@@ -176,6 +182,7 @@ class PluginsFragment : BaseFragment<FragmentPluginsBinding>(
                 binding.pluginRecyclerView.scrollToPosition(0)
             }
         }
+        CompanionSessionManager.syncCompletedEvent += tvSyncRefreshListener
 
         if (isLocal) {
             // No download button and no categories on local

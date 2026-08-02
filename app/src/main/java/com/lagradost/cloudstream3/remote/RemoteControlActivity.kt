@@ -10,9 +10,14 @@ import androidx.lifecycle.lifecycleScope
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.databinding.ActivityRemoteControlBinding
+import com.lagradost.cloudstream3.remote.ui.PairingFlow
 import com.lagradost.cloudstream3.utils.UIHelper.enableEdgeToEdgeCompat
 import kotlinx.coroutines.launch
 
+/**
+ * Classic dpad/text remote (plan §6.7). Kept as a secondary tool behind Companion settings;
+ * all sends are now v2 signed envelopes via the active paired TV.
+ */
 class RemoteControlActivity : AppCompatActivity() {
     private lateinit var binding: ActivityRemoteControlBinding
     private lateinit var discovery: LanRemoteDiscovery
@@ -30,9 +35,12 @@ class RemoteControlActivity : AppCompatActivity() {
         setupConnection()
         setupControls()
 
-        LanRemoteClient.selectedEndpoint(this)?.let { endpoint ->
-            binding.remoteHost.setText(endpoint.host)
-            binding.remoteStatus.text = getString(R.string.remote_saved_device, endpoint.host)
+        // Seed the host field: active TV first, then legacy v1 prefs (plan §5.2).
+        val active = PairingManager.getActiveTv()
+        val host = active?.host ?: LanRemoteClient.legacyEndpoint(this)?.first
+        if (host != null) {
+            binding.remoteHost.setText(host)
+            binding.remoteStatus.text = getString(R.string.remote_saved_device, host)
         }
     }
 
@@ -92,27 +100,45 @@ class RemoteControlActivity : AppCompatActivity() {
             }
             binding.remoteStatus.setText(R.string.remote_connecting)
             lifecycleScope.launch {
-                runCatching { LanRemoteClient.ping(endpoint) }
+                runCatching { LanRemoteClient.ping(endpoint.host, endpoint.port) }
                     .onSuccess { response ->
                         if (response.accepted) {
-                            LanRemoteClient.selectEndpoint(this@RemoteControlActivity, endpoint)
-                            binding.remoteStatus.text = getString(
-                                R.string.remote_connected_to,
-                                response.message ?: endpoint.host,
-                            )
+                            val info = response.payloadAs<DeviceInfo>()
+                            val name = info?.name ?: endpoint.host
+                            if (info != null && PairingManager.getPairedTvs().containsKey(info.deviceId)) {
+                                PairingManager.updateTvEndpoint(info.deviceId, endpoint.host, endpoint.port)
+                                binding.remoteStatus.text = getString(R.string.remote_connected_to, name)
+                                binding.remotePair.isEnabled = false
+                            } else {
+                                binding.remoteStatus.text = getString(R.string.companion_pairing_required, name)
+                                binding.remotePair.isEnabled = true
+                            }
                         } else {
-                            binding.remoteStatus.text = response.message
+                            binding.remoteStatus.text = response.error
                                 ?: getString(R.string.remote_connection_failed)
                         }
                     }
                     .onFailure {
-                        binding.remoteStatus.setText(R.string.remote_connection_failed)
+                        binding.remoteStatus.text = getString(R.string.remote_connection_failed)
                     }
+            }
+        }
+        binding.remotePair.setOnClickListener {
+            val endpoint = endpointFromInput() ?: return@setOnClickListener
+            binding.remoteStatus.setText(R.string.companion_pairing_waiting)
+            lifecycleScope.launch {
+                val tv = PairingFlow.pair(this@RemoteControlActivity, endpoint.host, endpoint.port) { status ->
+                    binding.remoteStatus.text = status
+                }
+                if (tv != null) {
+                    binding.remoteStatus.text = getString(R.string.companion_paired_with, tv.name)
+                    binding.remotePair.isEnabled = false
+                }
             }
         }
         binding.remoteBrowse.setOnClickListener { finish() }
         binding.remoteLaunch.setOnClickListener {
-            send(LanRemoteRequest(command = LanRemoteCommand.LAUNCH))
+            send(RemoteMessageType.LAUNCH)
         }
     }
 
@@ -132,7 +158,7 @@ class RemoteControlActivity : AppCompatActivity() {
             binding.remoteMute to KeyEvent.KEYCODE_VOLUME_MUTE,
         ).forEach { (button, keyCode) ->
             button.setOnClickListener {
-                send(LanRemoteRequest(command = LanRemoteCommand.KEY, keyCode = keyCode))
+                send(RemoteMessageType.KEY, KeyPayload(keyCode))
             }
         }
 
@@ -145,21 +171,28 @@ class RemoteControlActivity : AppCompatActivity() {
 
     private fun sendText() {
         val text = binding.remoteText.text?.toString()?.takeIf(String::isNotBlank) ?: return
-        send(LanRemoteRequest(command = LanRemoteCommand.TEXT, text = text))
+        send(RemoteMessageType.TEXT, TextPayload(text))
         binding.remoteText.text?.clear()
     }
 
-    private fun send(request: LanRemoteRequest) {
+    private fun send(type: RemoteMessageType, payload: Any? = null) {
         lifecycleScope.launch {
-            runCatching { LanRemoteClient.send(this@RemoteControlActivity, request) }
+            runCatching { CompanionSessionManager.send(type, payload) }
                 .onSuccess { response ->
                     if (!response.accepted) {
-                        binding.remoteStatus.text = response.message
-                            ?: getString(R.string.remote_command_failed)
+                        binding.remoteStatus.text = when (response.error) {
+                            "unauthenticated" -> getString(R.string.companion_repair_required)
+                            else -> response.error ?: getString(R.string.remote_command_failed)
+                        }
                     }
                 }
                 .onFailure {
-                    binding.remoteStatus.setText(R.string.remote_connection_failed)
+                    binding.remoteStatus.text =
+                        if (PairingManager.getActiveTv() == null) {
+                            getString(R.string.companion_pairing_required, "TV")
+                        } else {
+                            getString(R.string.remote_connection_failed)
+                        }
                 }
         }
     }

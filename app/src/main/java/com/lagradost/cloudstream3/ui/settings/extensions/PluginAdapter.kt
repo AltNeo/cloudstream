@@ -16,6 +16,8 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.databinding.RepositoryItemBinding
 import com.lagradost.cloudstream3.plugins.PluginManager
 import com.lagradost.cloudstream3.plugins.PluginWrapper
+import com.lagradost.cloudstream3.remote.CompanionSessionManager
+import com.lagradost.cloudstream3.remote.tvSyncBadge
 import com.lagradost.cloudstream3.ui.BaseDiffCallback
 import com.lagradost.cloudstream3.ui.NoStateAdapter
 import com.lagradost.cloudstream3.ui.ViewHolderState
@@ -205,6 +207,17 @@ class PluginAdapter(
 
         binding.subText.isGone = metadata.description.isNullOrBlank()
         binding.subText.text = metadata.description.html()
+
+        // Companion TV-sync badge (plan §8.5): shows the per-plugin result of the last
+        // extension sync with the paired TV. Hidden when nothing has been synced yet.
+        val syncStatus = CompanionSessionManager.lastSyncResults
+            .firstOrNull { it.internalName == metadata.internalName }
+        if (syncStatus == null) {
+            binding.extTvSync.isVisible = false
+        } else {
+            binding.extTvSync.isVisible = true
+            binding.extTvSync.text = "TV " + syncStatus.status.tvSyncBadge()
+        }
     }
 
     companion object {

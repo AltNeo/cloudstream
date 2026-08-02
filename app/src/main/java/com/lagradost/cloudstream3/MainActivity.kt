@@ -39,6 +39,7 @@ import androidx.core.view.isVisible
 import androidx.core.view.marginStart
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.navigation.NavController
 import androidx.navigation.NavDestination
 import androidx.navigation.NavDestination.Companion.hierarchy
@@ -87,7 +88,13 @@ import com.lagradost.cloudstream3.mvvm.observe
 import com.lagradost.cloudstream3.mvvm.observeNullable
 import com.lagradost.cloudstream3.network.initClient
 import com.lagradost.cloudstream3.plugins.PluginManager
+import com.lagradost.cloudstream3.remote.CompanionSessionManager
 import com.lagradost.cloudstream3.remote.LanRemoteService
+import com.lagradost.cloudstream3.remote.NowPlayingPayload
+import com.lagradost.cloudstream3.remote.PairingManager
+import com.lagradost.cloudstream3.remote.PlayerCmdPayload
+import com.lagradost.cloudstream3.remote.RemoteMessageType
+import com.lagradost.cloudstream3.remote.ui.CompanionNowPlayingFragment
 import com.lagradost.cloudstream3.plugins.PluginManager.___DO_NOT_CALL_FROM_A_PLUGIN_loadAllOnlinePlugins
 import com.lagradost.cloudstream3.plugins.PluginManager.loadSinglePlugin
 import com.lagradost.cloudstream3.receivers.VideoDownloadRestartReceiver
@@ -183,6 +190,7 @@ import com.lagradost.cloudstream3.utils.txt
 import com.lagradost.safefile.SafeFile
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
@@ -274,6 +282,12 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
          * Used by DataStoreHelper to fully reload Navigation Rail header picture
          */
         val reloadAccountEvent = Event<Boolean>()
+
+        /**
+         * Companion library sync: fires with the *unprefixed* DataStore key that just changed
+         * (plan §9.3). Phone pushes a delta to the TV; TV pushes progress report-back to phones.
+         */
+        val libraryChangedEvent = Event<String>()
 
         /**
          * @return true if the str has launched an app task (be it successful or not)
@@ -721,6 +735,8 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
             }
         }
         filesToDelete = setOf()
+        // Phone role: tear down the companion event channel with the activity.
+        CompanionSessionManager.stop()
         val broadcastIntent = Intent()
         broadcastIntent.action = "restart_service"
         broadcastIntent.setClass(this, VideoDownloadRestartReceiver::class.java)
@@ -733,6 +749,58 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
     override fun onNewIntent(intent: Intent) {
         handleAppIntent(intent)
         super.onNewIntent(intent)
+    }
+
+    // ------------------------------------------------------------------
+    // Companion now-playing mini bar (plan §6.5, phone role)
+    // ------------------------------------------------------------------
+
+    private fun setupCompanionNowPlaying() {
+        binding?.companionNowPlayingBar?.setOnClickListener {
+            CompanionNowPlayingFragment().show(supportFragmentManager, "companion_now_playing")
+        }
+        binding?.companionNowPlayingPlayPause?.setOnClickListener {
+            sendCompanionCmd(PlayerCmdPayload.Action.PLAY_PAUSE)
+        }
+        binding?.companionNowPlayingStop?.setOnClickListener {
+            sendCompanionCmd(PlayerCmdPayload.Action.STOP)
+        }
+        lifecycleScope.launch {
+            CompanionSessionManager.nowPlaying.collect { payload -> updateCompanionNowPlayingBar(payload) }
+        }
+    }
+
+    private fun sendCompanionCmd(action: PlayerCmdPayload.Action) {
+        lifecycleScope.launch {
+            runCatching {
+                CompanionSessionManager.send(
+                    RemoteMessageType.PLAYER_CMD,
+                    PlayerCmdPayload(action),
+                )
+            }
+        }
+    }
+
+    private fun updateCompanionNowPlayingBar(payload: NowPlayingPayload?) {
+        val bar = binding?.companionNowPlayingBar ?: return
+        val show = payload != null &&
+            payload.state != NowPlayingPayload.State.IDLE &&
+            payload.state != NowPlayingPayload.State.ENDED
+        if (!show) {
+            bar.isVisible = false
+            return
+        }
+        bar.isVisible = true
+        binding?.companionNowPlayingTitle?.text = payload.title ?: payload.episodeName ?: ""
+        binding?.companionNowPlayingStatus?.text = getString(R.string.companion_now_playing_status)
+        binding?.companionNowPlayingPoster?.loadImage(payload.poster)
+        binding?.companionNowPlayingPlayPause?.setImageResource(
+            if (payload.state == NowPlayingPayload.State.PLAYING) {
+                R.drawable.ic_baseline_pause_24
+            } else {
+                R.drawable.ic_baseline_play_arrow_24
+            }
+        )
     }
 
     private fun handleAppIntent(intent: Intent?) {
@@ -1985,9 +2053,15 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
         }
 
         FcastManager().init(this, false)
-        val uiModeType = resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK
-        if (uiModeType == Configuration.UI_MODE_TYPE_TELEVISION) {
+        // Receiver role: gate the LAN server on the companion setting instead of hardcoding TV mode
+        // (plan §10). Default ON for TVs, OFF for phones.
+        if (PairingManager.isControlAllowed(this)) {
             LanRemoteService.start(this)
+        }
+        // Phone role: run the companion session (event channel + one-shot sends).
+        if (!PairingManager.isTelevision(this)) {
+            CompanionSessionManager.start(this)
+            setupCompanionNowPlaying()
         }
 
         APIRepository.dubStatusActive = getApiDubstatusSettings()

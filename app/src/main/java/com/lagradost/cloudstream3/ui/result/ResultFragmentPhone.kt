@@ -24,6 +24,7 @@ import androidx.core.view.isVisible
 import androidx.core.widget.NestedScrollView
 import androidx.core.widget.doOnTextChanged
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewModelScope
 import com.discord.panels.OverlappingPanelsLayout
 import com.discord.panels.PanelState
@@ -52,6 +53,10 @@ import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.mvvm.observe
 import com.lagradost.cloudstream3.mvvm.observeNullable
 import com.lagradost.cloudstream3.mvvm.safe
+import com.lagradost.cloudstream3.remote.CompanionSessionManager
+import com.lagradost.cloudstream3.remote.OpenPagePayload
+import com.lagradost.cloudstream3.remote.PairingManager
+import com.lagradost.cloudstream3.remote.RemoteMessageType
 import com.lagradost.cloudstream3.services.SubscriptionWorkManager
 import com.lagradost.cloudstream3.syncproviders.AccountManager.Companion.APP_STRING_SHARE
 import com.lagradost.cloudstream3.ui.BaseFragment
@@ -107,6 +112,7 @@ import com.lagradost.cloudstream3.utils.txt
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentLinkedDeque
 import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 
 open class ResultFragmentPhone : BaseFragment<FragmentResultSwipeBinding>(
     BindingCreator.Inflate(FragmentResultSwipeBinding::inflate)
@@ -366,7 +372,7 @@ open class ResultFragmentPhone : BaseFragment<FragmentResultSwipeBinding>(
     var selectSeason: String? = null
     var selectEpisodeRange: String? = null
 
-    private fun setUrl(url: String?) {
+    private fun setUrl(url: String?, apiName: String?) {
         if (url == null) {
             binding?.resultOpenInBrowser?.isVisible = false
             return
@@ -379,6 +385,12 @@ open class ResultFragmentPhone : BaseFragment<FragmentResultSwipeBinding>(
             setOnClickListener {
                 context?.openBrowser(url)
             }
+            // Companion semantic navigation (plan §6.6): long-press opens this exact
+            // provider page on the paired TV instead of the local browser.
+            setOnLongClickListener {
+                openOnTv(url, apiName)
+                true
+            }
         }
 
         resultBinding?.resultReloadConnectionOpenInBrowser?.setOnClickListener {
@@ -387,6 +399,38 @@ open class ResultFragmentPhone : BaseFragment<FragmentResultSwipeBinding>(
 
         resultBinding?.resultMetaSite?.setOnClickListener {
             view?.context?.openBrowser(url)
+        }
+        resultBinding?.resultMetaSite?.setOnLongClickListener {
+            openOnTv(url, apiName)
+            true
+        }
+    }
+
+    /** Sends OPEN_PAGE to the paired TV; no-op (with a toast) when nothing is paired. */
+    private fun openOnTv(url: String?, apiName: String?) {
+        val ctx = context ?: return
+        if (url.isNullOrBlank() || apiName.isNullOrBlank()) return
+        if (PairingManager.isTelevision(ctx)) return // this device IS the TV
+        if (PairingManager.getActiveTv() == null) {
+            showToast(R.string.companion_no_active_tv)
+            return
+        }
+        showToast(R.string.companion_opening_on_tv)
+        lifecycleScope.launch {
+            runCatching {
+                CompanionSessionManager.send(
+                    RemoteMessageType.OPEN_PAGE,
+                    OpenPagePayload(apiName, url),
+                )
+            }.onFailure {
+                showToast(R.string.companion_no_active_tv)
+            }.onSuccess { reply ->
+                if (!reply.accepted) {
+                    showToast(
+                        reply.error ?: getString(R.string.companion_open_failed)
+                    )
+                }
+            }
         }
     }
 
@@ -466,7 +510,7 @@ open class ResultFragmentPhone : BaseFragment<FragmentResultSwipeBinding>(
                 storedData.start
             )
 
-        setUrl(storedData.url)
+        setUrl(storedData.url, storedData.apiName)
         syncModel.addFromUrl(storedData.url)
         val api = APIHolder.getApiFromNameNull(storedData.apiName)
 
@@ -1039,7 +1083,7 @@ open class ResultFragmentPhone : BaseFragment<FragmentResultSwipeBinding>(
                                 logError(e)
                             }
                         }
-                        setUrl(d.url)
+                        setUrl(d.url, d.apiName.asString(requireContext()))
                         resultBookmarkFab.apply {
                             isVisible = true
                             extend()

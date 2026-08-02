@@ -2,17 +2,19 @@ package com.lagradost.cloudstream3.remote
 
 import android.content.Context
 import android.content.Intent
-import android.media.AudioManager
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.view.KeyCharacterMap
-import android.view.KeyEvent
+import android.util.Log
+import com.lagradost.cloudstream3.BuildConfig
 import com.lagradost.cloudstream3.CommonActivity
-import com.lagradost.cloudstream3.actions.temp.CloudStreamPackage
-import com.lagradost.cloudstream3.ui.player.OfflinePlaybackHelper
+import com.lagradost.cloudstream3.MainActivity
+import com.lagradost.cloudstream3.remote.server.CommandHandlers
+import com.lagradost.cloudstream3.remote.server.NowPlayingHub
+import com.lagradost.cloudstream3.remote.sync.LibrarySyncManager
+import com.lagradost.cloudstream3.ui.PairingOverlayDialog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,38 +23,41 @@ import kotlinx.coroutines.launch
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.ServerSocket
+import java.net.Socket
 import java.net.SocketException
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.serialization.json.JsonObject
 
+/**
+ * TV-side server (plan §5.1). Public API stays `start/stop`; internals are rewritten:
+ * - one coroutine per accepted socket (no more sequential accept loop),
+ * - v1/v2 frame detection: v1 PING answered for old phones, everything else "upgrade-required",
+ * - auth gate: PING / PAIR_* unauthenticated, all other types require a valid HMAC,
+ * - SUBSCRIBE sockets stay open and stream RemoteEvents until disconnect,
+ * - cold-start PLAY / OPEN_PAGE via PendingCommandQueue.
+ */
 object LanRemoteServer {
+    private const val TAG = "LanRemoteServer"
+
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
     private var serverSocket: ServerSocket? = null
     private var nsdManager: NsdManager? = null
     private var registrationListener: NsdManager.RegistrationListener? = null
-
-    private val allowedKeyCodes = setOf(
-        KeyEvent.KEYCODE_DPAD_UP,
-        KeyEvent.KEYCODE_DPAD_DOWN,
-        KeyEvent.KEYCODE_DPAD_LEFT,
-        KeyEvent.KEYCODE_DPAD_RIGHT,
-        KeyEvent.KEYCODE_DPAD_CENTER,
-        KeyEvent.KEYCODE_ENTER,
-        KeyEvent.KEYCODE_BACK,
-        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-        KeyEvent.KEYCODE_MEDIA_REWIND,
-        KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
-        KeyEvent.KEYCODE_MEDIA_NEXT,
-        KeyEvent.KEYCODE_MEDIA_PREVIOUS,
-        KeyEvent.KEYCODE_VOLUME_UP,
-        KeyEvent.KEYCODE_VOLUME_DOWN,
-        KeyEvent.KEYCODE_VOLUME_MUTE,
-    )
+    private val libraryListenerAttached = AtomicBoolean(false)
 
     fun start(context: Context) {
         if (!started.compareAndSet(false, true)) return
         val appContext = context.applicationContext
+
+        // TV-side progress report-back: capture DataStoreHelper writes and push LIBRARY_DELTA (plan §6.4/§9.3).
+        if (libraryListenerAttached.compareAndSet(false, true)) {
+            MainActivity.libraryChangedEvent += { key ->
+                LibrarySyncManager.onLibraryChanged(appContext, key)
+            }
+        }
+
         scope.launch {
             try {
                 val socket = ServerSocket(LanRemoteProtocol.PORT).apply {
@@ -62,7 +67,9 @@ object LanRemoteServer {
                 mainHandler.post { registerService(appContext) }
                 while (isActive) {
                     val client = socket.accept()
-                    runCatching { handleClient(appContext, client) }
+                    scope.launch {
+                        runCatching { handleClient(appContext, client) }
+                    }
                 }
             } catch (_: SocketException) {
                 started.set(false)
@@ -84,120 +91,284 @@ object LanRemoteServer {
         nsdManager = null
     }
 
-    private fun handleClient(context: Context, client: java.net.Socket) {
+    // ------------------------------------------------------------------
+
+    private suspend fun handleClient(context: Context, client: Socket) {
         client.use { socket ->
             socket.soTimeout = 5_000
-            val response = runCatching {
-                val request = LanRemoteProtocol.read<LanRemoteRequest>(
-                    DataInputStream(socket.getInputStream())
-                )
-                process(context, request)
+            val element = runCatching {
+                LanRemoteProtocol.readFrame(DataInputStream(socket.getInputStream()))
             }.getOrElse { error ->
-                LanRemoteResponse(
-                    requestId = "unknown",
-                    accepted = false,
-                    message = error.message ?: "Invalid request",
+                Log.w(TAG, "Invalid frame from ${socket.inetAddress}: ${error.message}")
+                writeErrorReply(socket, "unknown", "invalid-request")
+                return
+            }
+
+            if (LanRemoteProtocol.isV2Frame(element)) {
+                val envelope = runCatching {
+                    LanRemoteProtocol.json.decodeFromString<RemoteEnvelope>(element.toString())
+                }.getOrElse {
+                    writeErrorReply(socket, "unknown", "invalid-envelope")
+                    return
+                }
+                handleV2(context, socket, envelope)
+            } else {
+                handleV1(context, socket, element)
+            }
+        }
+    }
+
+    private suspend fun handleV1(context: Context, socket: Socket, element: kotlinx.serialization.json.JsonElement) {
+        val request = runCatching {
+            LanRemoteProtocol.json.decodeFromString<LanRemoteRequest>(element.toString())
+        }.getOrElse {
+            writeErrorReplyV1(socket, "unknown", "invalid-request")
+            return
+        }
+        val response = when (request.command) {
+            // Old phones still get a meaningful PING answer; everything else must upgrade.
+            LanRemoteCommand.PING -> LanRemoteResponse(
+                requestId = request.requestId,
+                accepted = true,
+                message = deviceName(),
+            )
+
+            else -> LanRemoteResponse(
+                requestId = request.requestId,
+                accepted = false,
+                message = "upgrade-required",
+            )
+        }
+        runCatching {
+            LanRemoteProtocol.write(DataOutputStream(socket.getOutputStream()), response)
+        }
+    }
+
+    private suspend fun handleV2(context: Context, socket: Socket, envelope: RemoteEnvelope) {
+        val output = DataOutputStream(socket.getOutputStream())
+        when (envelope.type) {
+            RemoteMessageType.PING -> {
+                val paired = PairingManager.getPhoneToken(envelope.deviceId) != null
+                val reply = RemoteReply(
+                    requestId = envelope.requestId,
+                    accepted = true,
+                    payload = encodePayload(CommandHandlers.buildDeviceInfo(context, paired)),
+                )
+                runCatching { LanRemoteProtocol.write(output, reply) }
+            }
+
+            RemoteMessageType.PAIR_HELLO -> handlePairHello(context, output, envelope)
+            RemoteMessageType.PAIR_VERIFY -> handlePairVerify(context, output, envelope)
+
+            RemoteMessageType.SUBSCRIBE -> handleSubscribe(context, socket, output, envelope)
+
+            else -> {
+                val auth = authenticate(envelope)
+                if (auth != AuthResult.OK) {
+                    val error = when (auth) {
+                        AuthResult.CLOCK_SKEW -> "clock-skew"
+                        else -> "unauthenticated"
+                    }
+                    runCatching {
+                        LanRemoteProtocol.write(
+                            output,
+                            RemoteReply(requestId = envelope.requestId, accepted = false, error = error),
+                        )
+                    }
+                    return
+                }
+                val reply = CommandHandlers.handle(context, envelope)
+                runCatching { LanRemoteProtocol.write(output, reply) }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Pairing
+    // ------------------------------------------------------------------
+
+    private fun handlePairHello(
+        context: Context,
+        output: DataOutputStream,
+        envelope: RemoteEnvelope,
+    ) {
+        val hello = envelope.payloadAs<PairHelloRequest>()
+        if (hello == null || hello.deviceId.isBlank()) {
+            runCatching {
+                LanRemoteProtocol.write(output, RemoteReply(requestId = envelope.requestId, accepted = false, error = "invalid-pairing"))
+            }
+            return
+        }
+        if (!PairingManager.isPairingAllowed(context)) {
+            runCatching {
+                LanRemoteProtocol.write(output, RemoteReply(requestId = envelope.requestId, accepted = false, error = "pairing-disabled"))
+            }
+            return
+        }
+        // A device that is already paired must unpair first: this prevents a LAN attacker
+        // from re-issuing a PAIR_HELLO with a victim's deviceId to overwrite their token
+        // (review S1). Re-pairing after the TV-side unpair works normally.
+        if (PairingManager.getPairedPhones().containsKey(hello.deviceId)) {
+            runCatching {
+                LanRemoteProtocol.write(output, RemoteReply(requestId = envelope.requestId, accepted = false, error = "already-paired"))
+            }
+            return
+        }
+        val session = PairingManager.startPairingSession(hello.deviceId, hello.deviceName)
+        mainHandler.post {
+            if (CommonActivity.activity == null) {
+                launchApp(context)
+            }
+            PairingOverlayDialog.show(session)
+        }
+        // Debug/e2e hook (adb logcat only in debug builds): lets an adb-driven test read the PIN.
+        if (BuildConfig.DEBUG) {
+            Log.i(TAG, "CompanionPairing PIN for ${hello.deviceName}: ${session.pin}")
+        }
+        runCatching {
+            LanRemoteProtocol.write(
+                output,
+                RemoteReply(
+                    requestId = envelope.requestId,
+                    accepted = true,
+                    payload = encodePayload(PairHelloReply(session.sessionId, 120_000)),
+                ),
+            )
+        }
+    }
+
+    private fun handlePairVerify(
+        context: Context,
+        output: DataOutputStream,
+        envelope: RemoteEnvelope,
+    ) {
+        val verify = envelope.payloadAs<PairVerifyRequest>()
+        if (verify == null) {
+            runCatching {
+                LanRemoteProtocol.write(output, RemoteReply(requestId = envelope.requestId, accepted = false, error = "invalid-pairing"))
+            }
+            return
+        }
+        val session = PairingManager.getPairingSession(verify.pairingSessionId)
+        if (session == null) {
+            runCatching {
+                LanRemoteProtocol.write(output, RemoteReply(requestId = envelope.requestId, accepted = false, error = "pairing-expired"))
+            }
+            return
+        }
+        // The verifier must be the same device that started the session: the PIN is only
+        // proof of physical presence, not of identity (review S1).
+        if (envelope.deviceId != session.phoneDeviceId) {
+            runCatching {
+                LanRemoteProtocol.write(output, RemoteReply(requestId = envelope.requestId, accepted = false, error = "device-mismatch"))
+            }
+            return
+        }
+        when (PairingManager.verifyPin(session, verify.pin)) {
+            PairingManager.PinResult.OK -> {
+                val token = RemoteAuth.newToken()
+                PairingManager.registerPhone(
+                    PairedPhone(session.phoneDeviceId, session.phoneName, token)
+                )
+                mainHandler.post { PairingOverlayDialog.dismiss() }
+                runCatching {
+                    LanRemoteProtocol.write(
+                        output,
+                        RemoteReply(
+                            requestId = envelope.requestId,
+                            accepted = true,
+                            payload = encodePayload(
+                                PairVerifyReply(token, CommandHandlers.buildDeviceInfo(context, paired = true))
+                            ),
+                        ),
+                    )
+                }
+            }
+
+            PairingManager.PinResult.WRONG -> runCatching {
+                LanRemoteProtocol.write(output, RemoteReply(requestId = envelope.requestId, accepted = false, error = "invalid-pin"))
+            }
+            PairingManager.PinResult.EXPIRED -> runCatching {
+                LanRemoteProtocol.write(output, RemoteReply(requestId = envelope.requestId, accepted = false, error = "pairing-expired"))
+            }
+            PairingManager.PinResult.BLOCKED -> runCatching {
+                LanRemoteProtocol.write(output, RemoteReply(requestId = envelope.requestId, accepted = false, error = "pairing-blocked"))
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // SUBSCRIBE event channel
+    // ------------------------------------------------------------------
+
+    private suspend fun handleSubscribe(
+        context: Context,
+        socket: Socket,
+        output: DataOutputStream,
+        envelope: RemoteEnvelope,
+    ) {
+        val auth = authenticate(envelope)
+        if (auth != AuthResult.OK) {
+            runCatching {
+                LanRemoteProtocol.write(
+                    output,
+                    RemoteReply(requestId = envelope.requestId, accepted = false, error = "unauthenticated"),
                 )
             }
-            runCatching {
-                LanRemoteProtocol.write(DataOutputStream(socket.getOutputStream()), response)
+            return
+        }
+        runCatching {
+            // Frame-atomicity: broadcast writes use the same socket-level lock (NowPlayingHub.writeEvent).
+            synchronized(socket) {
+                LanRemoteProtocol.write(output, RemoteReply(requestId = envelope.requestId, accepted = true))
             }
         }
+        NowPlayingHub.registerSubscriber(envelope.deviceId, socket)
+
+        // Hold the socket open; NowPlayingHub streams events. Detect disconnect via EOF.
+        try {
+            socket.soTimeout = 30_000
+            val input = DataInputStream(socket.getInputStream())
+            while (true) {
+                val b = input.read()
+                if (b == -1) break
+            }
+        } catch (_: Exception) {
+            // disconnected / timed out
+        }
+        NowPlayingHub.unregisterSubscriber(envelope.deviceId, socket)
     }
 
-    private fun process(context: Context, request: LanRemoteRequest): LanRemoteResponse {
-        if (request.version != LanRemoteProtocol.VERSION) {
-            return request.rejected("Unsupported protocol version")
-        }
+    // ------------------------------------------------------------------
 
-        return when (request.command) {
-            LanRemoteCommand.PING -> request.accepted(deviceName())
-            LanRemoteCommand.LAUNCH -> {
-                mainHandler.post { launchApp(context) }
-                request.accepted()
-            }
-
-            LanRemoteCommand.KEY -> {
-                val keyCode = request.keyCode
-                if (keyCode == null || keyCode !in allowedKeyCodes) {
-                    request.rejected("Unsupported key")
-                } else {
-                    mainHandler.post { dispatchKey(context, keyCode) }
-                    request.accepted()
-                }
-            }
-
-            LanRemoteCommand.TEXT -> {
-                val text = request.text?.takeIf { it.isNotBlank() }?.take(256)
-                if (text == null) {
-                    request.rejected("Text is empty")
-                } else {
-                    mainHandler.post { dispatchText(text) }
-                    request.accepted()
-                }
-            }
-
-            LanRemoteCommand.PLAY -> {
-                val play = request.play
-                if (play == null || play.links.isEmpty()) {
-                    request.rejected("No playable links")
-                } else {
-                    mainHandler.post { play(context, play) }
-                    request.accepted()
-                }
-            }
-        }
+    private fun authenticate(envelope: RemoteEnvelope): AuthResult {
+        val token = PairingManager.getPhoneToken(envelope.deviceId) ?: return AuthResult.BAD_AUTH
+        return RemoteAuth.verify(
+            token = token,
+            auth = envelope.auth,
+            requestId = envelope.requestId,
+            timestampMs = envelope.timestampMs,
+            nowMs = System.currentTimeMillis(),
+            seenRequestIds = PairingManager.replaySetFor(envelope.deviceId),
+        )
     }
 
-    private fun dispatchKey(context: Context, keyCode: Int) {
-        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
-            keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
-            keyCode == KeyEvent.KEYCODE_VOLUME_MUTE
-        ) {
-            val direction = when (keyCode) {
-                KeyEvent.KEYCODE_VOLUME_UP -> AudioManager.ADJUST_RAISE
-                KeyEvent.KEYCODE_VOLUME_DOWN -> AudioManager.ADJUST_LOWER
-                else -> AudioManager.ADJUST_TOGGLE_MUTE
-            }
-            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            audioManager.adjustStreamVolume(
-                AudioManager.STREAM_MUSIC,
-                direction,
-                AudioManager.FLAG_SHOW_UI,
+    private fun writeErrorReply(socket: Socket, requestId: String, error: String) {
+        runCatching {
+            LanRemoteProtocol.write(
+                DataOutputStream(socket.getOutputStream()),
+                RemoteReply(requestId = requestId, accepted = false, error = error),
             )
-            return
         }
-
-        val activity = CommonActivity.activity ?: return
-        val now = android.os.SystemClock.uptimeMillis()
-        activity.dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0))
-        activity.dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0))
     }
 
-    private fun dispatchText(text: String) {
-        val activity = CommonActivity.activity ?: return
-        val events = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
-            .getEvents(text.toCharArray()) ?: return
-        events.forEach(activity::dispatchKeyEvent)
-    }
-
-    private fun play(context: Context, payload: LanRemotePlayPayload, retries: Int = 0) {
-        val activity = CommonActivity.activity
-        if (activity == null) {
-            if (retries >= 10) return
-            launchApp(context)
-            mainHandler.postDelayed({ play(context, payload, retries + 1) }, 1_500)
-            return
+    private fun writeErrorReplyV1(socket: Socket, requestId: String, message: String) {
+        runCatching {
+            LanRemoteProtocol.write(
+                DataOutputStream(socket.getOutputStream()),
+                LanRemoteResponse(requestId = requestId, accepted = false, message = message),
+            )
         }
-        val intent = Intent().apply {
-            putExtra(CloudStreamPackage.LINKS_EXTRA, payload.links.toTypedArray())
-            putExtra(CloudStreamPackage.SUBTITLE_EXTRA, payload.subtitles.toTypedArray())
-            payload.title?.let { putExtra(CloudStreamPackage.TITLE_EXTRA, it) }
-            payload.mediaId?.let { putExtra(CloudStreamPackage.ID_EXTRA, it) }
-            payload.positionMs?.let { putExtra(CloudStreamPackage.POSITION_EXTRA, it) }
-            payload.durationMs?.let { putExtra(CloudStreamPackage.DURATION_EXTRA, it) }
-        }
-        OfflinePlaybackHelper.playIntent(activity, intent)
     }
 
     private fun launchApp(context: Context) {
@@ -228,16 +399,4 @@ object LanRemoteServer {
     }
 
     private fun deviceName(): String = "${Build.MANUFACTURER} ${Build.MODEL}"
-
-    private fun LanRemoteRequest.accepted(message: String? = null) = LanRemoteResponse(
-        requestId = requestId,
-        accepted = true,
-        message = message,
-    )
-
-    private fun LanRemoteRequest.rejected(message: String) = LanRemoteResponse(
-        requestId = requestId,
-        accepted = false,
-        message = message,
-    )
 }

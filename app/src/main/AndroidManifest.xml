@@ -112,6 +112,11 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".remote.ui.CompanionControlReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
         <profileable
             android:shell="true"
             tools:targetApi="q" />
@@ -297,6 +302,10 @@
             android:name=".remote.RemoteControlActivity"
             android:exported="false"
             android:screenOrientation="unspecified" />
+
+        <activity
+            android:name=".remote.ui.CompanionSettingsActivity"
+            android:exported="false" />
 
         <service
             android:name=".services.PackageInstallerService"

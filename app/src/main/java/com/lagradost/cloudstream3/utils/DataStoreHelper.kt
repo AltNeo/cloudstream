@@ -31,6 +31,7 @@ import com.lagradost.cloudstream3.ui.result.EpisodeSortType
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.result.VideoWatchState
 import com.lagradost.cloudstream3.utils.AppContextUtils.filterProviderByPreferredMedia
+import com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs
 import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
 import com.lagradost.cloudstream3.utils.serializers.WriteOnlySerializer
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -38,6 +39,7 @@ import kotlinx.serialization.KeepGeneratedSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
+import androidx.core.content.edit
 import java.util.Calendar
 import java.util.Date
 import java.util.GregorianCalendar
@@ -58,6 +60,9 @@ const val RESULT_SEASON = "result_season"
 const val RESULT_DUB = "result_dub"
 const val KEY_RESULT_SORT = "result_sort"
 const val USER_PINNED_PROVIDERS = "user_pinned_providers" // Key for pinned user set
+
+/** Timestamp side map for companion library sync (plan §9.3): "$currentAccount/companion/lib_sync_ts/<key>" -> ms */
+const val LIBRARY_SYNC_TS_KEY = "companion/lib_sync_ts"
 
 class UserPreferenceDelegate<T : Any>(
     private val key: String,
@@ -179,6 +184,27 @@ object DataStoreHelper {
     var accounts by PreferenceDelegate("$TAG/account", arrayOf<Account>())
     var selectedKeyIndex by PreferenceDelegate("$TAG/account_key_index", 0)
     val currentAccount: String get() = selectedKeyIndex.toString()
+
+    /**
+     * When true, writes originating from the companion library sync are not re-pushed
+     * (echo guard, plan §9.3). Raw putString applies bypass setters entirely, so this is
+     * belt-and-braces for any setter invoked during apply.
+     */
+    @Volatile
+    var isApplyingRemote: Boolean = false
+
+    /**
+     * Records the write timestamp in the LWW side map and emits [MainActivity.libraryChangedEvent]
+     * with the *unprefixed* key (plan §9.3). Called from the synced setters.
+     */
+    private fun markSyncedWrite(unprefixedKey: String) {
+        if (isApplyingRemote) return
+        context?.getSharedPrefs()?.edit()?.putString(
+            "$currentAccount/$LIBRARY_SYNC_TS_KEY/$unprefixedKey",
+            System.currentTimeMillis().toString(),
+        )?.apply()
+        MainActivity.libraryChangedEvent.invoke(unprefixedKey)
+    }
 
     /**
      * Get or set the current account homepage.
@@ -527,6 +553,8 @@ object DataStoreHelper {
     fun deleteBookmarkedData(id: Int?) {
         if (id == null) return
         AccountManager.localListApi.requireLibraryRefresh = true
+        markSyncedWrite("$RESULT_WATCH_STATE/$id")
+        markSyncedWrite("$RESULT_WATCH_STATE_DATA/$id")
         removeKey("$currentAccount/$RESULT_WATCH_STATE", id.toString())
         removeKey("$currentAccount/$RESULT_WATCH_STATE_DATA", id.toString())
     }
@@ -585,6 +613,7 @@ object DataStoreHelper {
                 isFromDownload,
             )
         )
+        markSyncedWrite("$RESULT_RESUME_WATCHING/$parentId")
     }
 
     private fun removeLastWatchedOld(parentId: Int?) {
@@ -594,6 +623,7 @@ object DataStoreHelper {
 
     fun removeLastWatched(parentId: Int?) {
         if (parentId == null) return
+        markSyncedWrite("$RESULT_RESUME_WATCHING/$parentId")
         removeKey("$currentAccount/$RESULT_RESUME_WATCHING", parentId.toString())
     }
 
@@ -617,6 +647,7 @@ object DataStoreHelper {
         if (id == null) return
         setKey("$currentAccount/$RESULT_WATCH_STATE_DATA", id.toString(), data)
         AccountManager.localListApi.requireLibraryRefresh = true
+        markSyncedWrite("$RESULT_WATCH_STATE_DATA/$id")
     }
 
     fun getBookmarkedData(id: Int?): BookmarkedData? {
@@ -639,6 +670,7 @@ object DataStoreHelper {
     fun removeSubscribedData(id: Int?) {
         if (id == null) return
         AccountManager.localListApi.requireLibraryRefresh = true
+        markSyncedWrite("$RESULT_SUBSCRIBED_STATE_DATA/$id")
         removeKey("$currentAccount/$RESULT_SUBSCRIBED_STATE_DATA", id.toString())
     }
 
@@ -652,12 +684,14 @@ object DataStoreHelper {
             lastSeenEpisodeCount = episodeResponse.getLatestEpisodes(),
         )
         setKey("$currentAccount/$RESULT_SUBSCRIBED_STATE_DATA", id.toString(), newData)
+        markSyncedWrite("$RESULT_SUBSCRIBED_STATE_DATA/$id")
     }
 
     fun setSubscribedData(id: Int?, data: SubscribedData) {
         if (id == null) return
         setKey("$currentAccount/$RESULT_SUBSCRIBED_STATE_DATA", id.toString(), data)
         AccountManager.localListApi.requireLibraryRefresh = true
+        markSyncedWrite("$RESULT_SUBSCRIBED_STATE_DATA/$id")
     }
 
     fun getSubscribedData(id: Int?): SubscribedData? {
@@ -674,6 +708,7 @@ object DataStoreHelper {
     fun removeFavoritesData(id: Int?) {
         if (id == null) return
         AccountManager.localListApi.requireLibraryRefresh = true
+        markSyncedWrite("$RESULT_FAVORITES_STATE_DATA/$id")
         removeKey("$currentAccount/$RESULT_FAVORITES_STATE_DATA", id.toString())
     }
 
@@ -681,6 +716,7 @@ object DataStoreHelper {
         if (id == null) return
         setKey("$currentAccount/$RESULT_FAVORITES_STATE_DATA", id.toString(), data)
         AccountManager.localListApi.requireLibraryRefresh = true
+        markSyncedWrite("$RESULT_FAVORITES_STATE_DATA/$id")
     }
 
     fun getFavoritesData(id: Int?): FavoritesData? {
@@ -692,6 +728,7 @@ object DataStoreHelper {
         if (id == null) return
         if (dur < 30_000) return // too short
         setKey("$currentAccount/$VIDEO_POS_DUR", id.toString(), PosDur(pos, dur))
+        markSyncedWrite("$VIDEO_POS_DUR/$id")
     }
 
     /**
@@ -764,9 +801,11 @@ object DataStoreHelper {
         if (id == null) return
         // None == No key
         if (watchState == VideoWatchState.None) {
+            markSyncedWrite("$VIDEO_WATCH_STATE/$id")
             removeKey("$currentAccount/$VIDEO_WATCH_STATE", id.toString())
         } else {
             setKey("$currentAccount/$VIDEO_WATCH_STATE", id.toString(), watchState)
+            markSyncedWrite("$VIDEO_WATCH_STATE/$id")
         }
     }
 
@@ -777,6 +816,7 @@ object DataStoreHelper {
 
     fun setDub(id: Int, status: DubStatus) {
         setKey("$currentAccount/$RESULT_DUB", id.toString(), status.ordinal)
+        markSyncedWrite("$RESULT_DUB/$id")
     }
 
     fun setResultWatchState(id: Int?, status: Int) {
@@ -785,6 +825,7 @@ object DataStoreHelper {
             deleteBookmarkedData(id)
         } else {
             setKey("$currentAccount/$RESULT_WATCH_STATE", id.toString(), status)
+            markSyncedWrite("$RESULT_WATCH_STATE/$id")
         }
     }
 
@@ -804,6 +845,7 @@ object DataStoreHelper {
 
     fun setResultSeason(id: Int, value: Int?) {
         setKey("$currentAccount/$RESULT_SEASON", id.toString(), value)
+        markSyncedWrite("$RESULT_SEASON/$id")
     }
 
     fun getResultEpisode(id: Int): Int? {
@@ -812,6 +854,7 @@ object DataStoreHelper {
 
     fun setResultEpisode(id: Int, value: Int?) {
         setKey("$currentAccount/$RESULT_EPISODE", id.toString(), value)
+        markSyncedWrite("$RESULT_EPISODE/$id")
     }
 
     fun addSync(id: Int, idPrefix: String, url: String) {

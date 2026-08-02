@@ -47,6 +47,7 @@ import com.lagradost.cloudstream3.plugins.RepositoryManager.PREBUILT_REPOSITORIE
 import com.lagradost.cloudstream3.plugins.RepositoryManager.downloadPluginToFile
 import com.lagradost.cloudstream3.plugins.RepositoryManager.getRepoPlugins
 import com.lagradost.cloudstream3.plugins.RepositoryManager.sha256
+import com.lagradost.cloudstream3.remote.sync.SyncHooks
 import com.lagradost.cloudstream3.ui.settings.extensions.REPOSITORIES_KEY
 import com.lagradost.cloudstream3.ui.settings.extensions.RepositoryData
 import com.lagradost.cloudstream3.utils.AppContextUtils.getApiProviderLangSettings
@@ -82,6 +83,10 @@ data class PluginData(
     @JsonProperty("isOnline") @SerialName("isOnline") val isOnline: Boolean,
     @JsonProperty("filePath") @SerialName("filePath") val filePath: String,
     @JsonProperty("version") @SerialName("version") val version: Int,
+    // Expected sha256 of the plugin file, captured at download time (companion sync, plan §8.1)
+    @JsonProperty("fileHash") @SerialName("fileHash") val fileHash: String? = null,
+    // Repository the plugin came from (companion sync needs it to rebuild SyncedPlugin, plan §8.1)
+    @JsonProperty("repositoryUrl") @SerialName("repositoryUrl") val repositoryUrl: String? = null,
 ) {
     @WorkerThread
     fun toSitePlugin(): SitePlugin {
@@ -133,6 +138,7 @@ object PluginManager {
                 setKey(PLUGINS_KEY_LOCAL, plugins.filter { it.filePath != data.filePath } + data)
             }
         }
+        SyncHooks.onPluginsChanged.invoke(Unit)
     }
 
     private suspend fun deletePluginData(data: PluginData?) {
@@ -146,7 +152,23 @@ object PluginManager {
                 setKey(PLUGINS_KEY_LOCAL, plugins)
             }
         }
+        SyncHooks.onPluginsChanged.invoke(Unit)
     }
+
+    /**
+     * Public wrapper for the private [setPluginData]. Used by the companion extension sync
+     * (persist a downloaded plugin without loading it, e.g. safe mode).
+     */
+    suspend fun persistPluginData(data: PluginData) {
+        setPluginData(data)
+    }
+
+    /**
+     * Public wrapper around the private [loadPlugin]. Used by the companion extension sync
+     * to install plugins pushed/downloaded on the TV side.
+     */
+    suspend fun loadPluginFile(context: Context, file: File, data: PluginData): Boolean =
+        loadPlugin(context, file, data)
 
     suspend fun deleteRepositoryData(repositoryPath: String) {
         lock.withLock {
@@ -159,6 +181,7 @@ object PluginManager {
             }
             setKey(PLUGINS_KEY, plugins)
         }
+        SyncHooks.onPluginsChanged.invoke(Unit)
     }
 
     /**
@@ -763,7 +786,7 @@ object PluginManager {
         loadPlugin: Boolean
     ): Boolean {
         val file = getPluginPath(activity, internalName, repositoryUrl)
-        return downloadPlugin(activity, pluginUrl, pluginHash, internalName, file, loadPlugin)
+        return downloadPlugin(activity, pluginUrl, pluginHash, internalName, file, loadPlugin, repositoryUrl)
     }
 
     suspend fun downloadPlugin(
@@ -773,6 +796,7 @@ object PluginManager {
         internalName: String,
         file: File,
         loadPlugin: Boolean,
+        repositoryUrl: String? = null,
     ): Boolean {
         try {
             Log.d(TAG, "Downloading plugin: $pluginUrl to ${file.absolutePath}")
@@ -784,7 +808,9 @@ object PluginManager {
                 pluginUrl,
                 true,
                 newFile.absolutePath,
-                PLUGIN_VERSION_NOT_SET
+                PLUGIN_VERSION_NOT_SET,
+                pluginHash,
+                repositoryUrl,
             )
 
             return if (loadPlugin) {
