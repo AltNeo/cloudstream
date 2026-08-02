@@ -1300,8 +1300,10 @@ class ResultViewModel2 : ViewModel() {
                 isCasting = isCasting,
                 offset = 0
             )
-        } catch (_: CancellationException) {
-            // Do nothing
+        } catch (e: CancellationException) {
+            // Cancellation means this link request is no longer wanted. Do not
+            // continue into the callback with a partial link set.
+            throw e
         } catch (e: Exception) {
             logError(e)
         } finally {
@@ -1556,16 +1558,18 @@ class ResultViewModel2 : ViewModel() {
                             sourceTypes = PlaybackCoordinator.remoteSourceTypes,
                             isCasting = true,
                         ) { links ->
-                            runCatching {
+                            try {
                                 PlaybackCoordinator.playOnTv(
                                     activity ?: error("No activity"),
                                     click.data,
                                     links,
                                 )
-                            }.onFailure {
-                                logError(it)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                logError(e)
                                 showToast(
-                                    it.message
+                                    e.message
                                         ?: activity?.getString(R.string.remote_not_connected)
                                         ?: "TV unreachable"
                                 )

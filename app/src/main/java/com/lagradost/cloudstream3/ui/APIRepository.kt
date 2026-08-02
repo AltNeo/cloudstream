@@ -20,6 +20,7 @@ import com.lagradost.cloudstream3.newSearchResponseList
 import com.lagradost.cloudstream3.utils.Coroutines.atomicListOf
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
@@ -212,6 +213,8 @@ class APIRepository(val api: MainAPI) {
             withTimeout(getTimeout(api.loadLinksTimeoutMs)) {
                 api.loadLinks(data, isCasting, subtitleCallback, callback)
             }
+        } catch (throwable: CancellationException) {
+            throw throwable
         } catch (throwable: Throwable) {
             logError(throwable)
             return false

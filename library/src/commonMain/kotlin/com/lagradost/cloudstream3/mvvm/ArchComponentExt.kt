@@ -210,6 +210,8 @@ suspend fun <T> safeApiCall(
     return apiCall.ioWork { work ->
         try {
             Resource.Success(work.invoke())
+        } catch (throwable: CancellationException) {
+            throw throwable
         } catch (throwable: Throwable) {
             logError(throwable)
             throwAbleToResource(throwable)
