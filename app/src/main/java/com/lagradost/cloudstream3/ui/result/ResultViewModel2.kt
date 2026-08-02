@@ -3,6 +3,7 @@ package com.lagradost.cloudstream3.ui.result
 import android.app.Activity
 import android.content.Context
 import android.content.DialogInterface
+import android.content.Intent
 import android.util.Log
 import android.widget.Toast
 import androidx.annotation.MainThread
@@ -76,8 +77,11 @@ import com.lagradost.cloudstream3.ui.player.LOADTYPE_ALL
 import com.lagradost.cloudstream3.ui.player.LOADTYPE_CHROMECAST
 import com.lagradost.cloudstream3.ui.player.LOADTYPE_INAPP
 import com.lagradost.cloudstream3.ui.player.LOADTYPE_INAPP_DOWNLOAD
+import com.lagradost.cloudstream3.ui.player.PlaybackCoordinator
+import com.lagradost.cloudstream3.ui.player.PrimaryPlaybackTarget
 import com.lagradost.cloudstream3.ui.player.RepoLinkGenerator
 import com.lagradost.cloudstream3.ui.player.SubtitleData
+import com.lagradost.cloudstream3.remote.ui.CompanionSettingsActivity
 import com.lagradost.cloudstream3.ui.result.EpisodeAdapter.Companion.getPlayerAction
 import com.lagradost.cloudstream3.utils.AppContextUtils.getNameFull
 import com.lagradost.cloudstream3.utils.AppContextUtils.isConnectedToChromecast
@@ -1368,7 +1372,7 @@ class ResultViewModel2 : ViewModel() {
                     )
                 }
 
-                options.add(txt(R.string.episode_action_play_in_app) to ACTION_PLAY_EPISODE_IN_PLAYER)
+                options.add(txt(R.string.episode_action_play_in_app) to ACTION_PLAY_EPISODE_LOCALLY)
                 options.addAll(
                     listOf(
                         txt(R.string.episode_action_auto_download) to ACTION_DOWNLOAD_EPISODE,
@@ -1544,28 +1548,51 @@ class ResultViewModel2 : ViewModel() {
             }
 
             ACTION_PLAY_EPISODE_IN_PLAYER -> {
-                val list = HashMap<String, String>(currentResponse?.syncData ?: emptyMap())
-                val generator = generator ?: return
+                when (activity?.let(PlaybackCoordinator::primaryTarget)) {
+                    PrimaryPlaybackTarget.REMOTE_TV -> {
+                        loadLinks(
+                            click.data,
+                            isVisible = true,
+                            sourceTypes = PlaybackCoordinator.remoteSourceTypes,
+                            isCasting = true,
+                        ) { links ->
+                            runCatching {
+                                PlaybackCoordinator.playOnTv(
+                                    activity ?: error("No activity"),
+                                    click.data,
+                                    links,
+                                )
+                            }.onFailure {
+                                logError(it)
+                                showToast(
+                                    it.message
+                                        ?: activity?.getString(R.string.remote_not_connected)
+                                        ?: "TV unreachable"
+                                )
+                            }
+                        }
+                        return
+                    }
 
-                // I know kinda shit to iterate all, but it is 100% sure to work
-                val index = generator.videos.indexOfFirst { value -> value.id == click.data.id }
-
-                if (currentResponse?.type == TvType.CustomMedia) {
-                    generator.generateLinks(
-                        offset = index,
-                        clearCache = true,
-                        isCasting = false,
-                        sourceTypes = LOADTYPE_ALL,
-                        callback = {},
-                        subtitleCallback = {})
-                } else {
-                    activity?.navigate(
-                        R.id.global_to_navigation_player,
-                        GeneratorPlayer.newInstance(
-                            generator, index,list
+                    PrimaryPlaybackTarget.PAIR_TV -> {
+                        showToast(R.string.companion_pair_tv_to_play)
+                        activity?.startActivity(
+                            Intent(activity, CompanionSettingsActivity::class.java)
                         )
-                    )
+                        return
+                    }
+
+                    PrimaryPlaybackTarget.LOCAL_TV -> {
+                        playLocally(click)
+                        return
+                    }
+
+                    null -> return
                 }
+            }
+
+            ACTION_PLAY_EPISODE_LOCALLY -> {
+                playLocally(click)
             }
 
             ACTION_MARK_AS_WATCHED -> {
@@ -1613,12 +1640,12 @@ class ResultViewModel2 : ViewModel() {
                         val options = mutableListOf<Pair<UiText, Int>>()
 
                         // Add internal player option
-                        options.add(txt(R.string.episode_action_play_in_app) to ACTION_PLAY_EPISODE_IN_PLAYER)
+                        options.add(txt(R.string.episode_action_play_in_app) to ACTION_PLAY_EPISODE_LOCALLY)
 
                         // Add external player options 
                         options.addAll(players.filter { it !is AlwaysAskAction }.map { player ->
                             player.name to (VideoClickActionHolder.uniqueIdToId(player.uniqueId())
-                                ?: ACTION_PLAY_EPISODE_IN_PLAYER)
+                                ?: ACTION_PLAY_EPISODE_LOCALLY)
                         })
 
                         postPopup(
@@ -1666,6 +1693,29 @@ class ResultViewModel2 : ViewModel() {
                     }
                 }
             }
+        }
+    }
+
+    private suspend fun playLocally(click: EpisodeClickEvent) {
+        val list = HashMap<String, String>(currentResponse?.syncData ?: emptyMap())
+        val generator = generator ?: return
+
+        // I know kinda shit to iterate all, but it is 100% sure to work
+        val index = generator.videos.indexOfFirst { value -> value.id == click.data.id }
+
+        if (currentResponse?.type == TvType.CustomMedia) {
+            generator.generateLinks(
+                offset = index,
+                clearCache = true,
+                isCasting = false,
+                sourceTypes = LOADTYPE_ALL,
+                callback = {},
+                subtitleCallback = {})
+        } else {
+            activity?.navigate(
+                R.id.global_to_navigation_player,
+                GeneratorPlayer.newInstance(generator, index, list)
+            )
         }
     }
 

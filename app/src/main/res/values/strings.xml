@@ -793,7 +793,6 @@
         <item quantity="other">%d downloads queued</item>
     </plurals>
     <string name="player_is_live">Live</string>
-    <string name="play_on_tv">Play on TV</string>
     <string name="remote_control">CloudStream remote</string>
     <string name="remote_discovered_devices">Discovered TVs</string>
     <string name="remote_no_devices">No TVs discovered</string>
@@ -836,7 +835,8 @@
     <string name="companion_add_tv">Add TV</string>
     <string name="companion_pair_now">Pair</string>
     <string name="companion_settings_section">Settings</string>
-    <string name="companion_play_sends_to_tv">Play button sends to TV</string>
+    <string name="companion_pair_tv_to_play">Pair a TV to play from this device</string>
+    <string name="companion_no_tv_links">No TV-compatible links were found</string>
     <string name="companion_sync_extensions">Sync extensions</string>
     <string name="companion_sync_library">Sync library</string>
     <string name="companion_allow_control">Allow this device to be controlled</string>

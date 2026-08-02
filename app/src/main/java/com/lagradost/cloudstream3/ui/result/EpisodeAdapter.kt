@@ -6,12 +6,10 @@ import android.view.ViewGroup
 import androidx.core.view.isGone
 import androidx.core.view.isVisible
 import androidx.core.view.setPadding
-import androidx.preference.PreferenceManager
 import coil3.dispose
 import com.lagradost.cloudstream3.APIHolder.unixTimeMS
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.R
-import com.lagradost.cloudstream3.actions.VideoClickActionHolder
 import com.lagradost.cloudstream3.databinding.ResultEpisodeBinding
 import com.lagradost.cloudstream3.databinding.ResultEpisodeLargeBinding
 import com.lagradost.cloudstream3.syncproviders.AccountManager.Companion.secondsToReadable
@@ -22,6 +20,7 @@ import com.lagradost.cloudstream3.ui.download.DOWNLOAD_ACTION_DOWNLOAD
 import com.lagradost.cloudstream3.ui.download.DOWNLOAD_ACTION_LONG_CLICK
 import com.lagradost.cloudstream3.ui.download.DownloadClickEvent
 import com.lagradost.cloudstream3.ui.newSharedPool
+import com.lagradost.cloudstream3.ui.player.PlaybackCoordinator
 import com.lagradost.cloudstream3.ui.settings.Globals.EMULATOR
 import com.lagradost.cloudstream3.ui.settings.Globals.PHONE
 import com.lagradost.cloudstream3.ui.settings.Globals.TV
@@ -41,9 +40,10 @@ import java.util.Locale
 
 /**
  * Ids >= 1000 are reserved for VideoClickActions
- * @see VideoClickActionHolder
+ * Primary Play is routed by [PlaybackCoordinator] according to the device role.
  */
 const val ACTION_PLAY_EPISODE_IN_PLAYER = 1
+const val ACTION_PLAY_EPISODE_LOCALLY = 20
 const val ACTION_CHROME_CAST_EPISODE = 4
 const val ACTION_CHROME_CAST_MIRROR = 5
 
@@ -82,22 +82,7 @@ class EpisodeAdapter(
     companion object {
         const val HAS_POSTER: Int = 0
         const val HAS_NO_POSTER: Int = 1
-        fun getPlayerAction(context: Context): Int {
-            val settingsManager = PreferenceManager.getDefaultSharedPreferences(context)
-            val playerPref =
-                settingsManager.getString(context.getString(R.string.player_default_key), "")
-
-            val preferredActionId = VideoClickActionHolder.uniqueIdToId(playerPref)
-            val preferredAction = preferredActionId?.let(VideoClickActionHolder::getActionById)
-
-            // A paired-TV preference can outlive the pairing. Re-check visibility here so a
-            // normal Play click falls back to the phone player after unpairing or losing the TV.
-            return if (preferredAction?.shouldShowSafe(context, null) == true) {
-                preferredActionId
-            } else {
-                ACTION_PLAY_EPISODE_IN_PLAYER
-            }
-        }
+        fun getPlayerAction(context: Context): Int = ACTION_PLAY_EPISODE_IN_PLAYER
 
         val sharedPool =
             newSharedPool {

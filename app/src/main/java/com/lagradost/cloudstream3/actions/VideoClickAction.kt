@@ -32,7 +32,6 @@ import com.lagradost.cloudstream3.actions.temp.VlcPackage
 import com.lagradost.cloudstream3.actions.temp.WebVideoCastPackage
 import com.lagradost.cloudstream3.actions.temp.fcast.FcastAction
 import com.lagradost.cloudstream3.mvvm.logError
-import com.lagradost.cloudstream3.remote.RemotePlayAction
 import com.lagradost.cloudstream3.ui.result.LinkLoadingResult
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.utils.Coroutines.atomicListOf
@@ -57,7 +56,6 @@ object VideoClickActionHolder {
         MpvExPackage(),
         NextPlayerPackage(),
         JustPlayerPackage(),
-        RemotePlayAction(),
         FcastAction(),
         LibreTorrentPackage(),
         BiglyBTPackage(),

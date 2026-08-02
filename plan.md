@@ -1,6 +1,8 @@
 # CloudStream Companion — Phone ⇄ TV (plan.md)
 
-> **Feature**: Use the phone app as the native companion for the TV app.
+> **Feature**: Use the phone app as the native companion for the TV app. The TV is
+> the only movie playback target: the TV can browse and play independently, or the
+> phone can browse and send the primary Play command to the TV.
 > Extensions, repos, accounts, cookies and logins live on the **phone**; the **TV**
 > receives fully-resolved streams and renders playback. Libraries (bookmarks,
 > subscriptions, favorites, watch progress) are shared. Extensions installed on
@@ -27,7 +29,7 @@ A first cut of a LAN remote is **already committed** (`feat(remote): add phone t
 | `LanRemoteService.kt` | Foreground service (`connectedDevice`) hosting the server. |
 | `LanRemoteBootReceiver.kt` | Starts the service on boot **only if** `UI_MODE_TYPE_TELEVISION`. |
 | `RemoteControlActivity.kt` | Phone UI: discovery spinner, manual host entry, dpad buttons, text input. This is the "broken remote" experience we must supersede (keep it as a secondary "classic remote" tab). |
-| `RemotePlayAction.kt` | A `VideoClickAction` (`isPlayer=true`, `isCasting=true`) registered in `VideoClickActionHolder.allVideoClickActions` (`actions/VideoClickAction.kt:60`). Resolves links on the phone, serializes `CloudStreamPackage.MinimalVideoLink` / `MinimalSubtitleLink` and sends `PLAY`. Only visible when an endpoint is selected. |
+| `ui/player/PlaybackCoordinator.kt` | Core playback-target decision. TV devices keep the native local player; paired phones resolve links and send the primary Play request to the TV. The LAN protocol is an implementation detail, not a player action. |
 
 Supporting pieces that already exist elsewhere:
 
@@ -44,10 +46,10 @@ Supporting pieces that already exist elsewhere:
 - `MainActivity.kt` (~line 1990) — auto-starts `LanRemoteService` when
   `Configuration.UI_MODE_TYPE_TELEVISION`.
 - `SettingsFragment.kt:252` — settings row that opens `RemoteControlActivity`.
-- `EpisodeAdapter.kt:90` + `ResultViewModel2.kt:1620` — the "default player"
-  mechanism: a persisted `VideoClickAction.uniqueId()` decides what a single
-  press on Play does. Setting that pref to `RemotePlayAction`'s uniqueId makes
-  **Play → TV** the native default (no UI fork needed).
+- `EpisodeAdapter.kt` + `ResultViewModel2.kt` — the primary Play action is now a
+  stable app action. `PlaybackCoordinator` selects local TV playback, remote TV
+  playback, or pairing UI. Explicit "Play in app" and external-player actions
+  remain separate local escape hatches.
 - App-level `Event<T>` bus in `MainActivity.Companion`
   (`afterPluginsLoadedEvent`, `bookmarksUpdatedEvent`, `reloadLibraryEvent`) —
   reuse this pattern for sync triggers.
@@ -332,17 +334,18 @@ Keep NSD. Add two robustness items:
 
 ## 6. Play on TV — the native path
 
-### 6.1 Making "Play on TV" the default press
+### 6.1 Primary Play is a core app action
 
-- `RemotePlayAction.uniqueId()` = `null:com.lagradost.cloudstream3.remote.RemotePlayAction`.
-  When a TV is paired, write this into the same preference read by
-  `EpisodeAdapter.kt:90` (and shown in `ResultViewModel2.kt:1620`), so a single
-  press on Play sends to the TV — long-press still offers local playback.
-  Expose a companion setting **"Play button sends to TV"** (default ON after
-  pairing) that toggles that pref. This is what makes it feel native instead of
-  a bolted-on remote.
+- `EpisodeAdapter.getPlayerAction()` always emits the primary Play action; it no
+  longer stores a remote-player action in the generic player preference.
+- `PlaybackCoordinator.primaryTarget()` chooses `LOCAL_TV` for a TV device,
+  `REMOTE_TV` for a paired phone, and `PAIR_TV` when a phone has no active TV.
+- `PAIR_TV` opens companion settings. It must never silently start movie playback
+  on the phone.
+- The explicit `ACTION_PLAY_EPISODE_LOCALLY` path and external-player actions are
+  intentionally separate from primary Play.
 
-### 6.2 `RemotePlayAction` upgrades (rewrite `runAction`)
+### 6.2 `PlaybackCoordinator` remote-play implementation
 
 1. Build links as today, **but** keep provider identity: extend
    `CloudStreamPackage.MinimalVideoLink` with `val source: String? = null`
@@ -358,9 +361,9 @@ Keep NSD. Add two robustness items:
    applies to playlist/segment requests (`CS3IPlayer.kt:783-830`).
 3. Send `PlayPayload` (incl. `poster`, `title`, `mediaId`, resume position via
    existing `getViewPos(video.id)`).
-4. Errors: surface TV rejections (`RemoteReply.error`) via the existing
-   `check(...)` pattern; add specific handling for `"unauthenticated"` → toast
-   "Re-pair your TV" + open companion settings.
+4. Errors: surface TV rejections (`RemoteReply.error`) and keep the primary Play
+   path TV-only. `"unauthenticated"` opens the repair flow; unreachable TVs do
+   not fall back to the phone player.
 
 ### 6.3 TV-side playback & reporting (`remote/server/PlaybackReporter.kt` — new)
 
@@ -609,8 +612,8 @@ account only** — log & document this; multi-account merge is future work.
 `SettingsFragment.kt:252`):
 - Active TV card (name, IP, online?, buttons: Sync now, Classic remote, Unpair).
 - "Add TV" → discovery list (reuse `LanRemoteDiscovery`) + manual IP → PIN flow.
-- Toggles: Play button sends to TV · Sync extensions · Sync library · Show
-  now-playing notification.
+- Toggles: Sync extensions · Sync library · Show now-playing notification. The
+  primary Play target is automatic from the device role and active pairing.
 - Per-plugin sync status link-through to Extensions screen.
 
 **TV — Settings → Companion**: receiver on/off (also gates `LanRemoteService` —
@@ -657,7 +660,7 @@ app/src/main/res/layout/…             # companion_settings.xml, now_playing_sh
 | `remote/LanRemoteProtocol.kt` | v2 envelope/framing (§3.1); keep v1 PING compat reply. |
 | `remote/LanRemoteServer.kt` | per-client coroutines, auth gate, SUBSCRIBE channels, pending-command queue (§5.1). |
 | `remote/LanRemoteClient.kt` | signed envelopes; delegate endpoint selection to `PairingManager` (§5.2). |
-| `remote/RemotePlayAction.kt` | §6.2: source field, cookie merge, v2 payload, auth errors. |
+| `ui/player/PlaybackCoordinator.kt` | Native primary Play target selection and phone-to-TV payload construction (§6.1–6.2). |
 | `remote/RemoteControlActivity.kt` | route sends via `CompanionSessionManager`; keep as classic remote (§6.7). |
 | `remote/LanRemoteService.kt` | unchanged logic; start/stop now gated by receiver setting. |
 | `remote/LanRemoteBootReceiver.kt` | check receiver setting instead of only TV UI mode. |

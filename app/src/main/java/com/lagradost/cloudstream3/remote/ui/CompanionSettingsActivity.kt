@@ -6,9 +6,7 @@ import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.edit
 import androidx.lifecycle.lifecycleScope
-import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKey
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.setKey
 import com.lagradost.cloudstream3.CommonActivity
@@ -21,7 +19,6 @@ import com.lagradost.cloudstream3.remote.LanRemoteEndpoint
 import com.lagradost.cloudstream3.remote.PairingManager
 import com.lagradost.cloudstream3.remote.RemoteControlActivity
 import com.lagradost.cloudstream3.remote.RemoteMessageType
-import com.lagradost.cloudstream3.remote.RemotePlayAction
 import com.lagradost.cloudstream3.remote.payloadAs
 import com.lagradost.cloudstream3.utils.UIHelper.enableEdgeToEdgeCompat
 import kotlinx.coroutines.launch
@@ -112,9 +109,6 @@ class CompanionSettingsActivity : AppCompatActivity() {
                 if (tv != null) {
                     binding.companionStatus.text = getString(R.string.companion_paired_with, tv.name)
                     refreshView()
-                    if (!isTv) {
-                        setPlaySendsToTv(true)
-                    }
                 }
             }
         }
@@ -157,12 +151,6 @@ class CompanionSettingsActivity : AppCompatActivity() {
     }
 
     private fun setupToggles() {
-        binding.companionPlaySendsRow.visibility = if (isTv) View.GONE else View.VISIBLE
-        binding.companionPlaySends.isChecked = playSendsToTv()
-        binding.companionPlaySends.setOnCheckedChangeListener { _, checked ->
-            setPlaySendsToTv(checked)
-        }
-
         binding.companionSyncExt.isChecked = syncExtensionsEnabled()
         binding.companionSyncExt.setOnCheckedChangeListener { _, checked ->
             setSyncExtensionsEnabled(checked)
@@ -236,26 +224,6 @@ class CompanionSettingsActivity : AppCompatActivity() {
     companion object {
         const val SYNC_EXTENSIONS_KEY = "companion/sync_extensions"
         const val SYNC_LIBRARY_KEY = "companion/sync_library"
-
-        /** "Play button sends to TV" = the default-player pref is this action's uniqueId (plan §6.1). */
-        fun playSendsToTv(): Boolean {
-            val context = com.lagradost.cloudstream3.CloudStreamApp.Companion.context ?: return false
-            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-            return prefs.getString(context.getString(R.string.player_default_key), "") ==
-                RemotePlayAction().uniqueId()
-        }
-
-        fun setPlaySendsToTv(enabled: Boolean) {
-            val context = com.lagradost.cloudstream3.CloudStreamApp.Companion.context ?: return
-            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-            if (enabled) {
-                prefs.edit {
-                    putString(context.getString(R.string.player_default_key), RemotePlayAction().uniqueId())
-                }
-            } else {
-                prefs.edit { remove(context.getString(R.string.player_default_key)) }
-            }
-        }
 
         fun syncExtensionsEnabled(): Boolean = getKey<Boolean>(SYNC_EXTENSIONS_KEY) ?: true
 
