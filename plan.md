@@ -702,6 +702,30 @@ app/src/main/res/layout/…             # companion_settings.xml, now_playing_sh
 
 ---
 
+## 12.1. QC checkpoint (compaction-safe)
+
+Keep this checkpoint with the implementation so a context compaction cannot lose the
+reproduction contract:
+
+- Target TV: `192.168.0.8:5555`, package `com.lagradost.cloudstream3.debug`, role Android TV.
+- Fixture: repository shortcode `864` → Phisher Repo; extension `UHDmovies` v37; `Batman:
+  Caped Crusader`, Season 1, Episode 5 (`The Stress of Her Regard`).
+- Product invariant: TV browsing and phone browsing are both supported; the primary Play
+  action always targets the TV. Phone playback is never the fallback. Explicit local play is
+  only a diagnostic/developer path.
+- Baseline captured on 2026-08-02: TV fixture and episode are present; TV-local play reaches
+  the player but reports `No Links Found`. Phone/TV pairing succeeded; the phone emulator
+  became unavailable during the long remote repro, so an unsupported-URL rejection still
+  requires a live phone→TV replay before declaring it fixed.
+- Before every code change: record app versions, pairing state, extension/provider version,
+  exact episode, TV screenshot, and filtered phone/TV logcat around the PLAY request. Preserve
+  the first failing URL and its link type/source; do not replace it with a paraphrase.
+- Exit criteria: cold-TV and warm-TV primary Play both start on the TV; no phone player opens;
+  only absolute HTTP(S) TV-compatible links are transported; invalid/relative links produce a
+  clear no-TV-links result; resume, subtitles, and player commands still work.
+- Compaction handoff fields: current branch/commit, changed files, last test command/result,
+  device state, exact next action, and any retained `adb` artifact/log path.
+
 ## 13. Testing plan
 
 **Unit (JVM, `app/src/test/.../remote/`)** — extend alongside

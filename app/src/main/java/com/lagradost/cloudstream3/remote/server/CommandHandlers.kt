@@ -28,6 +28,7 @@ import com.lagradost.cloudstream3.remote.encodePayload
 import com.lagradost.cloudstream3.remote.payloadAs
 import com.lagradost.cloudstream3.remote.sync.ExtensionSyncManager
 import com.lagradost.cloudstream3.remote.sync.LibrarySyncManager
+import com.lagradost.cloudstream3.ui.player.PlaybackCoordinator
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -93,10 +94,17 @@ object CommandHandlers {
 
             RemoteMessageType.PLAY -> {
                 val play = payload.payloadAs<PlayPayload>()
-                if (play == null || play.links.isEmpty()) {
+                val safePlay = play?.copy(
+                    links = PlaybackCoordinator.tvCompatibleLinks(play.links),
+                )
+                if (safePlay == null || safePlay.links.isEmpty()) {
                     err(envelope, "No playable links")
                 } else {
-                    PendingCommandQueue.submit(RemoteMessageType.PLAY, payload, context)
+                    PendingCommandQueue.submit(
+                        RemoteMessageType.PLAY,
+                        encodePayload(safePlay),
+                        context,
+                    )
                     ok(envelope)
                 }
             }

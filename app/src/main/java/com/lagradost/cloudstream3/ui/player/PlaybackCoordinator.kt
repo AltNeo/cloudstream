@@ -15,6 +15,7 @@ import com.lagradost.cloudstream3.utils.DataStoreHelper.getViewPos
 import com.lagradost.cloudstream3.utils.DrmExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkPlayList
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import java.net.URI
 
 enum class PrimaryPlaybackTarget {
     LOCAL_TV,
@@ -42,6 +43,7 @@ object PlaybackCoordinator {
         result: LinkLoadingResult,
     ) {
         val links = result.links
+            .filter { it.type in remoteSourceTypes && isTvCompatibleUrl(it.url) }
             .filterNot { it is DrmExtractorLink || it is ExtractorLinkPlayList }
             .map { link ->
                 CloudStreamPackage.MinimalVideoLink.fromExtractor(link).apply {
@@ -76,5 +78,21 @@ object PlaybackCoordinator {
             }
             throw IllegalStateException(response.error ?: "TV rejected playback")
         }
+    }
+
+    /** Provider link lists can contain relative pages or non-media schemes; never send those to TV. */
+    internal fun isTvCompatibleUrl(url: String): Boolean {
+        val parsed = runCatching { URI(url.trim()) }.getOrNull() ?: return false
+        return parsed.scheme?.lowercase() in setOf("http", "https") && !parsed.host.isNullOrBlank()
+    }
+
+    fun tvCompatibleLinks(
+        links: List<CloudStreamPackage.MinimalVideoLink>,
+    ): List<CloudStreamPackage.MinimalVideoLink> = links.filter { link ->
+        isTvCompatibleUrl(link.url ?: "") && link.mimeType in setOf(
+            ExtractorLinkType.VIDEO.getMimeType(),
+            ExtractorLinkType.DASH.getMimeType(),
+            ExtractorLinkType.M3U8.getMimeType(),
+        )
     }
 }
