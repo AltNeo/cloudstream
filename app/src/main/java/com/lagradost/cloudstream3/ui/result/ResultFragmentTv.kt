@@ -740,7 +740,11 @@ class ResultFragmentTv : BaseFragment<FragmentResultTvBinding>(
                 builder.setContentView(R.layout.bottom_loading)
                 builder.setOnDismissListener {
                     loadingDialog = null
-                    viewModel.cancelLinks()
+                    // Do not cancel the completed callback when this sheet is dismissed by the
+                    // ViewModel. A user dismissal during active progress still cancels loading.
+                    if (viewModel.loadedLinks.value != null) {
+                        viewModel.cancelLinks()
+                    }
                 }
                 builder.setCanceledOnTouchOutside(true)
                 builder.show()

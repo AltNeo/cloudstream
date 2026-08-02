@@ -1350,7 +1350,12 @@ open class ResultFragmentPhone : BaseFragment<FragmentResultSwipeBinding>(
                 builder.setContentView(R.layout.bottom_loading)
                 builder.setOnDismissListener {
                     loadingDialog = null
-                    viewModel.cancelLinks()
+                    // A null value means the ViewModel completed link loading and dismissed this
+                    // sheet itself. Only a user dismissal while progress is still visible should
+                    // cancel the callback, which may still be sending the resolved links to TV.
+                    if (viewModel.loadedLinks.value != null) {
+                        viewModel.cancelLinks()
+                    }
                 }
                 builder.setCanceledOnTouchOutside(true)
                 builder.show()
