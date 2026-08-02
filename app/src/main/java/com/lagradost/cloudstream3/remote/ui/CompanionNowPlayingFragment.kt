@@ -10,6 +10,7 @@ import androidx.lifecycle.lifecycleScope
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.databinding.SheetCompanionNowPlayingBinding
+import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.remote.CompanionSessionManager
 import com.lagradost.cloudstream3.remote.NowPlayingPayload
 import com.lagradost.cloudstream3.remote.PlayerCmdPayload
@@ -121,6 +122,12 @@ class CompanionNowPlayingFragment : BottomSheetDialogFragment() {
                     RemoteMessageType.PLAYER_CMD,
                     PlayerCmdPayload(action, positionMs = positionMs, deltaMs = deltaMs),
                 )
+            }.onSuccess { response ->
+                if (!response.accepted) {
+                    CommonActivity.showToast(response.error ?: getString(R.string.remote_command_failed))
+                }
+            }.onFailure { error ->
+                CommonActivity.showToast(error.message ?: getString(R.string.remote_connection_failed))
             }
         }
     }

@@ -777,6 +777,12 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
                     RemoteMessageType.PLAYER_CMD,
                     PlayerCmdPayload(action),
                 )
+            }.onSuccess { response ->
+                if (!response.accepted) {
+                    showToast(response.error ?: getString(R.string.remote_command_failed), Toast.LENGTH_SHORT)
+                }
+            }.onFailure { error ->
+                showToast(error.message ?: getString(R.string.remote_connection_failed), Toast.LENGTH_SHORT)
             }
         }
     }
