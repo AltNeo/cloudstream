@@ -53,7 +53,7 @@ object LanRemoteClient {
                 appContext?.let { PairingManager.myDeviceId(it) } ?: ""
             }.getOrDefault(""),
             type = type,
-            payload = payload?.let { encodePayload(it) },
+            payload = payload?.let { encodePayloadForMessage(type, it) },
         )
         sendRaw(host, port, envelope)
     }
@@ -92,4 +92,10 @@ object LanRemoteClient {
                 LanRemoteProtocol.read<RemoteReply>(DataInputStream(socket.getInputStream()))
             }
         }
+
+    private fun encodePayloadForMessage(type: RemoteMessageType, payload: Any) = when (type) {
+        RemoteMessageType.PAIR_HELLO -> encodePayload(payload as PairHelloRequest)
+        RemoteMessageType.PAIR_VERIFY -> encodePayload(payload as PairVerifyRequest)
+        else -> error("Unsupported unauthenticated payload: $type")
+    }
 }
