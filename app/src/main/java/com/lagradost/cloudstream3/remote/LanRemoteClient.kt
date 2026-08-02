@@ -35,7 +35,7 @@ object LanRemoteClient {
             timestampMs = now,
             auth = RemoteAuth.sign(tv.token, requestId, now),
             type = type,
-            payload = payload?.let { encodePayload(it) },
+            payload = payload?.let { encodePayloadForMessage(type, it) },
         )
         sendRaw(tv.host, tv.port, envelope)
     }
@@ -96,6 +96,16 @@ object LanRemoteClient {
     private fun encodePayloadForMessage(type: RemoteMessageType, payload: Any) = when (type) {
         RemoteMessageType.PAIR_HELLO -> encodePayload(payload as PairHelloRequest)
         RemoteMessageType.PAIR_VERIFY -> encodePayload(payload as PairVerifyRequest)
-        else -> error("Unsupported unauthenticated payload: $type")
+        RemoteMessageType.KEY -> encodePayload(payload as KeyPayload)
+        RemoteMessageType.TEXT -> encodePayload(payload as TextPayload)
+        RemoteMessageType.PLAY -> encodePayload(payload as PlayPayload)
+        RemoteMessageType.PLAYER_CMD -> encodePayload(payload as PlayerCmdPayload)
+        RemoteMessageType.OPEN_PAGE -> encodePayload(payload as OpenPagePayload)
+        RemoteMessageType.SYNC_EXTENSIONS -> encodePayload(payload as ExtensionSyncPayload)
+        RemoteMessageType.EXT_FILE_START -> encodePayload(payload as ExtFileStartPayload)
+        RemoteMessageType.EXT_FILE_CHUNK -> encodePayload(payload as ExtFileChunkPayload)
+        RemoteMessageType.EXT_FILE_END -> encodePayload(payload as ExtFileEndPayload)
+        RemoteMessageType.SYNC_LIBRARY -> encodePayload(payload as LibrarySyncPayload)
+        else -> error("Unsupported payload for message: $type")
     }
 }
