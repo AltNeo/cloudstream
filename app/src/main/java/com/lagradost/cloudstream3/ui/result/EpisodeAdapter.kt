@@ -87,7 +87,16 @@ class EpisodeAdapter(
             val playerPref =
                 settingsManager.getString(context.getString(R.string.player_default_key), "")
 
-            return VideoClickActionHolder.uniqueIdToId(playerPref) ?: ACTION_PLAY_EPISODE_IN_PLAYER
+            val preferredActionId = VideoClickActionHolder.uniqueIdToId(playerPref)
+            val preferredAction = preferredActionId?.let(VideoClickActionHolder::getActionById)
+
+            // A paired-TV preference can outlive the pairing. Re-check visibility here so a
+            // normal Play click falls back to the phone player after unpairing or losing the TV.
+            return if (preferredAction?.shouldShowSafe(context, null) == true) {
+                preferredActionId
+            } else {
+                ACTION_PLAY_EPISODE_IN_PLAYER
+            }
         }
 
         val sharedPool =

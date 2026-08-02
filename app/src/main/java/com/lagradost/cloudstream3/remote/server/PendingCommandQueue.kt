@@ -85,7 +85,7 @@ object PendingCommandQueue {
                         "Provider ${page.apiName} is not installed on this device"
                     )
                 } else {
-                    AppContextUtils.loadResult(page.url, page.apiName, api.name ?: page.apiName)
+                    AppContextUtils.loadResult(page.url, page.apiName, api.name)
                 }
             }
 
