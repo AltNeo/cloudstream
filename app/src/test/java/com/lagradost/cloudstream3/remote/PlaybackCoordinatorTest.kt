@@ -37,4 +37,18 @@ class PlaybackCoordinatorTest {
 
         assertTrue(PlaybackCoordinator.tvCompatibleLinks(listOf(valid, relative, torrent)) == listOf(valid))
     }
+
+    @Test
+    fun tvPayloadDropsOpaqueLinksUntilPhoneResolvesThem() {
+        val opaque = CloudStreamPackage.MinimalVideoLink(
+            uri = null,
+            url = "opaque-token::opaque-secret",
+            mimeType = "video/mp4",
+            name = "resolver-backed",
+            quality = null,
+            extractorData = "https://cdn.example.test/resolve?token=opaque-token",
+        )
+
+        assertTrue(PlaybackCoordinator.tvCompatibleLinks(listOf(opaque)).isEmpty())
+    }
 }

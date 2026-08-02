@@ -43,17 +43,23 @@ object PlaybackCoordinator {
         result: LinkLoadingResult,
     ) {
         val links = result.links
-            .filter { it.type in remoteSourceTypes && isTvCompatibleUrl(it.url) }
+            .filter {
+                it.type in remoteSourceTypes &&
+                    (isTvCompatibleUrl(it.url) || isTvCompatibleUrl(it.extractorData.orEmpty()))
+            }
             .filterNot { it is DrmExtractorLink || it is ExtractorLinkPlayList }
-            .map { link ->
-                CloudStreamPackage.MinimalVideoLink.fromExtractor(link).apply {
+            .mapNotNull { link ->
+                val minimal = CloudStreamPackage.MinimalVideoLink.fromExtractor(link).apply {
                     val cookies = runCatching {
-                        CookieManager.getInstance().getCookie(link.url)
+                        CookieManager.getInstance().getCookie(
+                            link.extractorData ?: link.url
+                        )
                     }.getOrNull()
                     if (!cookies.isNullOrBlank() && headers["Cookie"] == null) {
                         headers = headers + ("Cookie" to cookies)
                     }
                 }
+                PlaybackLinkResolver.resolve(context, minimal)
             }
         check(links.isNotEmpty()) { context.getString(R.string.companion_no_tv_links) }
 

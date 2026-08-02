@@ -936,7 +936,10 @@ suspend fun loadExtractor(
         val extractor = extractorApis[index]
         if (compareUrl.startsWith(extractor.mainUrl.replace(schemaStripRegex, ""))) {
             try {
-                extractor.getUrl(currentUrl, referer, subtitleCallback, callback)
+                extractor.getUrl(currentUrl, referer, subtitleCallback) { link ->
+                    if (link.extractorData == null) link.extractorData = currentUrl
+                    callback(link)
+                }
             } catch (e: Exception) {
                 logError(e)
                 // Rethrow if we have timed out
@@ -957,7 +960,10 @@ suspend fun loadExtractor(
             ) > 80
         ) {
             try {
-                extractor.getUrl(currentUrl, referer, subtitleCallback, callback)
+                extractor.getUrl(currentUrl, referer, subtitleCallback) { link ->
+                    if (link.extractorData == null) link.extractorData = currentUrl
+                    callback(link)
+                }
             } catch (e: Exception) {
                 logError(e)
                 // Rethrow if we have timed out

@@ -7,9 +7,9 @@ import android.os.Looper
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.actions.temp.CloudStreamPackage
+import com.lagradost.cloudstream3.remote.PlayPayload
 import com.lagradost.cloudstream3.remote.LanRemoteProtocol
 import com.lagradost.cloudstream3.remote.OpenPagePayload
-import com.lagradost.cloudstream3.remote.PlayPayload
 import com.lagradost.cloudstream3.remote.RemoteMessageType
 import com.lagradost.cloudstream3.ui.player.OfflinePlaybackHelper
 import com.lagradost.cloudstream3.utils.AppContextUtils

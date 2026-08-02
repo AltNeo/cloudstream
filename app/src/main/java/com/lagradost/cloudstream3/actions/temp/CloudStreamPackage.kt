@@ -64,6 +64,7 @@ class CloudStreamPackage : OpenInAppAction(
         @JsonProperty("name") @SerialName("name") val name: String?,
         @JsonProperty("headers") @SerialName("headers") var headers: Map<String, String> = mapOf(),
         @JsonProperty("quality") @SerialName("quality") val quality: Int?,
+        @JsonProperty("extractorData") @SerialName("extractorData") val extractorData: String? = null,
         // Provider identity (ExtractorLink.source / apiName). Lets the TV player resolve
         // getVideoInterceptor() and extension subtitle providers for remote streams (plan §7.1).
         @JsonProperty("source") @SerialName("source") val source: String? = null,
@@ -77,6 +78,7 @@ class CloudStreamPackage : OpenInAppAction(
                 headers = if (link.referer.isBlank()) emptyMap() else mapOf("referer" to link.referer) + link.headers,
                 quality = link.quality,
                 source = link.source,
+                extractorData = link.extractorData,
             )
         }
 
@@ -94,6 +96,9 @@ class CloudStreamPackage : OpenInAppAction(
 
                     this@newExtractorLink.quality =
                         this@MinimalVideoLink.quality ?: Qualities.Unknown.value
+
+                    this@newExtractorLink.extractorData =
+                        this@MinimalVideoLink.extractorData
                 }
             } to uri?.let { uri ->
                 ExtractorUri(
