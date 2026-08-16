@@ -4,6 +4,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.decodeFromJsonElement
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.util.UUID
@@ -51,6 +52,14 @@ data class LanRemoteResponse(
     val message: String? = null,
 )
 
+@Serializable
+data class EncryptedRemoteFrame(
+    val version: Int = LanRemoteProtocol.VERSION,
+    val deviceId: String,
+    val nonce: String,
+    val ciphertext: String,
+)
+
 object LanRemoteProtocol {
     const val VERSION = 2
     const val PORT = 46900
@@ -67,9 +76,10 @@ object LanRemoteProtocol {
      * JSON element. Used by the server to distinguish v1 frames ("command" key)
      * from v2 envelopes ("type" key) before decoding.
      */
-    fun readFrame(input: DataInputStream): JsonElement {
+    fun readFrame(input: DataInputStream, maxFrameBytes: Int = MAX_FRAME_BYTES): JsonElement {
+        require(maxFrameBytes in 1..MAX_FRAME_BYTES)
         val size = input.readInt()
-        require(size in 1..MAX_FRAME_BYTES) { "Invalid frame size: $size" }
+        require(size in 1..maxFrameBytes) { "Invalid frame size: $size" }
         val payload = ByteArray(size)
         input.readFully(payload)
         return json.parseToJsonElement(payload.decodeToString())
@@ -86,6 +96,39 @@ object LanRemoteProtocol {
     /** True if the frame is a v2 [RemoteEnvelope] (has a "type" field). */
     fun isV2Frame(element: JsonElement): Boolean =
         element is JsonObject && element.containsKey("type")
+
+    fun isEncryptedFrame(element: JsonElement): Boolean =
+        element is JsonObject && element.containsKey("ciphertext") && element.containsKey("nonce")
+
+    fun writeEncrypted(
+        output: DataOutputStream,
+        key: ByteArray,
+        deviceId: String,
+        element: JsonElement,
+    ) {
+        val encrypted = RemoteCrypto.encrypt(key, json.encodeToString(element).encodeToByteArray())
+        write(
+            output,
+            EncryptedRemoteFrame(
+                deviceId = deviceId,
+                nonce = RemoteAuth.encodeBase64(encrypted.nonce),
+                ciphertext = RemoteAuth.encodeBase64(encrypted.ciphertext),
+            ),
+        )
+    }
+
+    fun decryptFrame(element: JsonElement, key: ByteArray): Pair<EncryptedRemoteFrame, JsonElement> {
+        val frame = json.decodeFromJsonElement<EncryptedRemoteFrame>(element)
+        val nonce = RemoteAuth.decodeBase64(frame.nonce) ?: error("Invalid encrypted nonce")
+        val ciphertext = RemoteAuth.decodeBase64(frame.ciphertext) ?: error("Invalid encrypted frame")
+        val plaintext = RemoteCrypto.decrypt(key, nonce, ciphertext) ?: error("Invalid encrypted frame")
+        return frame to json.parseToJsonElement(plaintext.decodeToString())
+    }
+
+    fun readDecrypted(
+        input: DataInputStream,
+        key: ByteArray,
+    ): Pair<EncryptedRemoteFrame, JsonElement> = decryptFrame(readFrame(input), key)
 
     inline fun <reified T> read(input: DataInputStream): T =
         json.decodeFromString(readFrame(input).toString())

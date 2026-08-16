@@ -1,88 +1,160 @@
 package com.lagradost.cloudstream3.remote
 
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
+import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.abs
 
 enum class AuthResult {
-    OK, BAD_AUTH, CLOCK_SKEW, REPLAY,
+    OK, BAD_AUTH, CLOCK_SKEW, REPLAY, NONCE_CACHE_FULL,
 }
 
 /**
  * HMAC-SHA256 signing and verification for the companion protocol.
  *
- * `auth = Base64(HMAC_SHA256(token, "$requestId:$timestampMs"))`.
- *
- * The implementation is pure Kotlin/JVM (javax.crypto) so it is unit-testable
- * without Robolectric. Base64 is a small local RFC 4648 codec because
- * `android.util.Base64` is not available in plain JVM unit tests and
- * `java.util.Base64` requires API 26+ (minSdk is 23).
- *
- * Note: token storage is plain SharedPreferences (MODE_PRIVATE). Keystore /
- * EncryptedSharedPreferences is future hardening, not v1.
+ * The MAC covers a length-delimited canonical serialization of every envelope field that can
+ * affect command meaning. Payload object keys are sorted recursively, making equivalent JSON
+ * representations sign identically while preventing concatenation ambiguities.
  */
 object RemoteAuth {
     const val MAX_CLOCK_SKEW_MS = 5 * 60 * 1000L
     private const val HMAC_ALGO = "HmacSHA256"
-    private const val REPLAY_LRU_SIZE = 500
 
-    fun sign(token: String, requestId: String, timestampMs: Long): String {
+    fun sign(token: String, envelope: RemoteEnvelope): String = sign(
+        token = token,
+        version = envelope.version,
+        deviceId = envelope.deviceId,
+        requestId = envelope.requestId,
+        timestampMs = envelope.timestampMs,
+        type = envelope.type,
+        payload = envelope.payload,
+    )
+
+    fun sign(
+        token: String,
+        version: Int,
+        deviceId: String,
+        requestId: String,
+        timestampMs: Long,
+        type: RemoteMessageType,
+        payload: JsonObject?,
+    ): String {
         val mac = Mac.getInstance(HMAC_ALGO)
         mac.init(SecretKeySpec(token.toByteArray(Charsets.UTF_8), HMAC_ALGO))
-        val data = "$requestId:$timestampMs".toByteArray(Charsets.UTF_8)
-        return encodeBase64(mac.doFinal(data))
+        return encodeBase64(mac.doFinal(canonicalEnvelope(version, deviceId, requestId, timestampMs, type, payload)))
     }
 
-    /**
-     * @param seenRequestIds per-device LRU of requestIds (size capped at [REPLAY_LRU_SIZE]).
-     * Only requests that pass the HMAC check consume a slot, so unauthenticated attackers
-     * cannot evict legitimate entries.
-     */
+    /** A bounded nonce cache that retains every nonce while its timestamp is in the clock window. */
+    class ExpiringNonceCache(private val maxEntries: Int = 4096) {
+        private val entries = LinkedHashMap<String, Long>()
+
+        @Synchronized
+        fun addIfNew(requestId: String, timestampMs: Long, nowMs: Long): Boolean {
+            val iterator = entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (abs(nowMs - entry.value) > MAX_CLOCK_SKEW_MS) iterator.remove()
+            }
+            if (entries.containsKey(requestId)) return false
+            if (entries.size >= maxEntries) return false
+            entries[requestId] = timestampMs
+            return true
+        }
+
+        @Synchronized
+        fun size(): Int = entries.size
+
+        @Synchronized
+        fun contains(requestId: String): Boolean = entries.containsKey(requestId)
+
+        @Synchronized
+        fun clear() = entries.clear()
+    }
+
+    fun newNonceCache(maxEntries: Int = 4096): ExpiringNonceCache = ExpiringNonceCache(maxEntries)
+
     fun verify(
         token: String,
         auth: String?,
+        version: Int,
+        deviceId: String,
         requestId: String,
         timestampMs: Long,
+        type: RemoteMessageType,
+        payload: JsonObject?,
         nowMs: Long,
-        seenRequestIds: MutableSet<String>,
+        seenNonces: ExpiringNonceCache,
     ): AuthResult {
         if (auth.isNullOrEmpty() || requestId.isBlank()) return AuthResult.BAD_AUTH
         if (abs(nowMs - timestampMs) > MAX_CLOCK_SKEW_MS) return AuthResult.CLOCK_SKEW
-        if (!constantTimeEquals(sign(token, requestId, timestampMs), auth)) {
-            return AuthResult.BAD_AUTH
-        }
-        synchronized(seenRequestIds) {
-            if (!seenRequestIds.add(requestId)) return AuthResult.REPLAY
-            if (seenRequestIds.size > REPLAY_LRU_SIZE) {
-                // Drop the oldest half to keep the LRU bounded.
-                val iterator = seenRequestIds.iterator()
-                var dropped = 0
-                while (iterator.hasNext() && dropped < REPLAY_LRU_SIZE / 2) {
-                    iterator.next()
-                    iterator.remove()
-                    dropped++
-                }
-            }
+        if (!constantTimeProofEquals(
+                sign(token, version, deviceId, requestId, timestampMs, type, payload),
+                auth,
+            )
+        ) return AuthResult.BAD_AUTH
+        if (!seenNonces.addIfNew(requestId, timestampMs, nowMs)) {
+            return if (seenNonces.contains(requestId)) AuthResult.REPLAY else AuthResult.NONCE_CACHE_FULL
         }
         return AuthResult.OK
     }
 
-    /** 32 random bytes, Base64 encoded — the shared secret handed out at pairing time. */
+    /** 32 random bytes, Base64 encoded — the bearer token handed out at pairing time. */
     fun newToken(): String {
         val bytes = ByteArray(32)
         SecureRandom().nextBytes(bytes)
         return encodeBase64(bytes)
     }
 
-    private fun constantTimeEquals(a: String, b: String): Boolean {
-        if (a.length != b.length) return false
-        var result = 0
-        for (i in a.indices) {
-            result = result or (a[i].code xor b[i].code)
+    private fun canonicalEnvelope(
+        version: Int,
+        deviceId: String,
+        requestId: String,
+        timestampMs: Long,
+        type: RemoteMessageType,
+        payload: JsonObject?,
+    ): ByteArray {
+        val output = ByteArrayOutputStream()
+        DataOutputStream(output).use { data ->
+            data.writeInt(version)
+            writeField(data, deviceId)
+            writeField(data, requestId)
+            data.writeLong(timestampMs)
+            writeField(data, type.name)
+            writeField(data, payload?.let(::canonicalJson) ?: "<null>")
         }
-        return result == 0
+        return output.toByteArray()
     }
+
+    private fun writeField(output: DataOutputStream, value: String) {
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        output.writeInt(bytes.size)
+        output.write(bytes)
+    }
+
+    private fun canonicalJson(element: JsonElement): String = when (element) {
+        is JsonObject -> element.entries
+            .sortedBy { it.key }
+            .joinToString(prefix = "{", postfix = "}") { (key, value) ->
+                "${quoteJson(key)}:${canonicalJson(value)}"
+            }
+        is JsonArray -> element.joinToString(prefix = "[", postfix = "]", transform = ::canonicalJson)
+        is JsonPrimitive -> element.toString()
+    }
+
+    private fun quoteJson(value: String): String =
+        RemoteAuthJson.encodeToString(JsonPrimitive(value))
+
+    private val RemoteAuthJson = kotlinx.serialization.json.Json { encodeDefaults = true }
+
+    internal fun constantTimeProofEquals(a: String, b: String): Boolean =
+        MessageDigest.isEqual(a.toByteArray(Charsets.UTF_8), b.toByteArray(Charsets.UTF_8))
 
     // ------------------------------------------------------------------
     // RFC 4648 Base64 (standard alphabet, with padding, no line wrapping)
@@ -109,12 +181,8 @@ object RemoteAuth {
     fun decodeBase64(text: String): ByteArray? {
         val cleaned = text.filterNot { it == '\n' || it == '\r' }
         if (cleaned.isEmpty()) return ByteArray(0)
-        var padding = 0
         var end = cleaned.length
-        while (end > 0 && cleaned[end - 1] == '=') {
-            padding++
-            end--
-        }
+        while (end > 0 && cleaned[end - 1] == '=') end--
         val chars = cleaned.substring(0, end)
         if (chars.length % 4 == 1) return null
         val out = java.io.ByteArrayOutputStream((chars.length / 4) * 3)
@@ -125,8 +193,6 @@ object RemoteAuth {
             val isFullGroup = i + 3 < chars.length
             val c2 = decodeChar(chars.getOrNull(i + 2))
             val c3 = decodeChar(chars.getOrNull(i + 3))
-            // A full 4-char group must decode completely; only the final group may be short
-            // (2 or 3 data chars, padding stripped above).
             if (isFullGroup && (c2 == null || c3 == null)) return null
             if (c2 == null && c3 != null) return null
             val triple = (c0 shl 18) or (c1 shl 12) or ((c2 ?: 0) shl 6) or (c3 ?: 0)
@@ -138,15 +204,13 @@ object RemoteAuth {
         return out.toByteArray()
     }
 
-    private fun decodeChar(c: Char?): Int? {
-        if (c == null) return null
-        return when (c) {
-            in 'A'..'Z' -> c - 'A'
-            in 'a'..'z' -> c - 'a' + 26
-            in '0'..'9' -> c - '0' + 52
-            '+' -> 62
-            '/' -> 63
-            else -> null
-        }
+    private fun decodeChar(c: Char?): Int? = when (c) {
+        null -> null
+        in 'A'..'Z' -> c - 'A'
+        in 'a'..'z' -> c - 'a' + 26
+        in '0'..'9' -> c - '0' + 52
+        '+' -> 62
+        '/' -> 63
+        else -> null
     }
 }

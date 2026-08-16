@@ -16,6 +16,10 @@ import com.lagradost.cloudstream3.R
 class LanRemoteService : Service() {
     override fun onCreate() {
         super.onCreate()
+        if (!PairingManager.isControlAllowed(this)) {
+            stopSelf()
+            return
+        }
         createNotificationChannel()
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
         val pendingIntent = launchIntent?.let {

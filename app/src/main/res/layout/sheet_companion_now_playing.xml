@@ -6,7 +6,22 @@
     android:layout_height="wrap_content"
     android:background="?attr/primaryGrayBackground"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:paddingStart="20dp"
+    android:paddingTop="12dp"
+    android:paddingEnd="20dp"
+    android:paddingBottom="20dp">
+
+    <TextView
+        android:id="@+id/now_playing_eyebrow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:letterSpacing="0.12"
+        android:text="@string/companion_now_playing_eyebrow"
+        android:textAllCaps="true"
+        android:textColor="?attr/grayTextColor"
+        android:textSize="11sp"
+        android:textStyle="bold" />
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -16,8 +31,8 @@
 
         <ImageView
             android:id="@+id/now_playing_poster"
-            android:layout_width="88dp"
-            android:layout_height="120dp"
+            android:layout_width="96dp"
+            android:layout_height="132dp"
             android:background="@color/grayShimmer"
             android:contentDescription="@null"
             android:scaleType="centerCrop"
@@ -36,7 +51,7 @@
                 android:layout_height="wrap_content"
                 android:maxLines="2"
                 android:textColor="?attr/textColor"
-                android:textSize="16sp"
+                android:textSize="20sp"
                 android:textStyle="bold"
                 tools:text="The Perfect Run" />
 
@@ -50,6 +65,19 @@
                 android:textColor="?attr/grayTextColor"
                 android:textSize="13sp"
                 tools:text="Episode 1 · Playing on TV" />
+
+            <TextView
+                android:id="@+id/now_playing_stream"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:ellipsize="end"
+                android:singleLine="true"
+                android:textColor="?attr/textColor"
+                android:textSize="13sp"
+                android:visibility="gone"
+                tools:text="HDHub4u.Ag · 1080p"
+                tools:visibility="visible" />
 
             <TextView
                 android:id="@+id/now_playing_position"
@@ -67,6 +95,57 @@
                 android:max="1000"
                 tools:progress="300" />
         </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/now_playing_tracks"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="start"
+        android:orientation="horizontal"
+        android:visibility="gone"
+        tools:visibility="visible">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/now_playing_source"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/companion_sources"
+            android:textAllCaps="false"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/now_playing_video_track"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/video_tracks"
+            android:textAllCaps="false"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/now_playing_audio_track"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/audio_tracks"
+            android:textAllCaps="false"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/now_playing_disable_subtitles"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/companion_subtitles"
+            android:textAllCaps="false"
+            android:visibility="gone"
+            tools:visibility="visible" />
     </LinearLayout>
 
     <LinearLayout

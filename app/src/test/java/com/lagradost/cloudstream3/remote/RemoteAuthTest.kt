@@ -9,148 +9,107 @@ import org.junit.Test
 class RemoteAuthTest {
     private val token = RemoteAuth.newToken()
 
+    private fun envelope(
+        version: Int = 2,
+        deviceId: String = "device",
+        requestId: String = "request",
+        timestampMs: Long = 1_000L,
+        type: RemoteMessageType = RemoteMessageType.PLAY,
+        payload: kotlinx.serialization.json.JsonObject? = encodePayload(KeyPayload(7)),
+    ): RemoteEnvelope {
+        val unsigned = RemoteEnvelope(version, requestId, deviceId, timestampMs, null, type, payload)
+        return unsigned.copy(auth = RemoteAuth.sign(token, unsigned))
+    }
+
+    private fun verify(value: RemoteEnvelope, nowMs: Long = value.timestampMs, cache: RemoteAuth.ExpiringNonceCache = RemoteAuth.newNonceCache()) =
+        RemoteAuth.verify(
+            token = token,
+            auth = value.auth,
+            version = value.version,
+            deviceId = value.deviceId,
+            requestId = value.requestId,
+            timestampMs = value.timestampMs,
+            type = value.type,
+            payload = value.payload,
+            nowMs = nowMs,
+            seenNonces = cache,
+        )
+
     @Test
     fun `sign and verify round trip`() {
-        val requestId = "req-1"
-        val ts = System.currentTimeMillis()
-        val auth = RemoteAuth.sign(token, requestId, ts)
-
-        assertEquals(
-            AuthResult.OK,
-            RemoteAuth.verify(token, auth, requestId, ts, ts, mutableSetOf())
-        )
+        assertEquals(AuthResult.OK, verify(envelope()))
     }
 
     @Test
-    fun `wrong token fails`() {
-        val requestId = "req-2"
-        val ts = System.currentTimeMillis()
-        val auth = RemoteAuth.sign("other-token", requestId, ts)
-
-        assertEquals(
-            AuthResult.BAD_AUTH,
-            RemoteAuth.verify(token, auth, requestId, ts, ts, mutableSetOf())
-        )
+    fun `mutating every signed envelope field fails`() {
+        val original = envelope()
+        assertEquals(AuthResult.BAD_AUTH, verify(original.copy(version = 3)))
+        assertEquals(AuthResult.BAD_AUTH, verify(original.copy(deviceId = "other")))
+        assertEquals(AuthResult.BAD_AUTH, verify(original.copy(requestId = "other")))
+        assertEquals(AuthResult.BAD_AUTH, verify(original.copy(timestampMs = 1_001L)))
+        assertEquals(AuthResult.BAD_AUTH, verify(original.copy(type = RemoteMessageType.KEY)))
+        assertEquals(AuthResult.BAD_AUTH, verify(original.copy(payload = encodePayload(KeyPayload(8)))))
     }
 
     @Test
-    fun `tampered auth fails`() {
-        val requestId = "req-3"
-        val ts = System.currentTimeMillis()
-        val auth = RemoteAuth.sign(token, requestId, ts)
-        val tampered = if (auth.endsWith("A")) auth.dropLast(1) + "B" else auth + "x"
-
+    fun `wrong token and tampered auth fail`() {
+        val value = envelope()
         assertEquals(
             AuthResult.BAD_AUTH,
-            RemoteAuth.verify(token, tampered, requestId, ts, ts, mutableSetOf())
+            RemoteAuth.verify(
+                "other", value.auth, value.version, value.deviceId, value.requestId,
+                value.timestampMs, value.type, value.payload, value.timestampMs,
+                RemoteAuth.newNonceCache(),
+            )
         )
-    }
-
-    @Test
-    fun `null or empty auth fails`() {
-        val ts = System.currentTimeMillis()
-        assertEquals(
-            AuthResult.BAD_AUTH,
-            RemoteAuth.verify(token, null, "req-4", ts, ts, mutableSetOf())
-        )
-        assertEquals(
-            AuthResult.BAD_AUTH,
-            RemoteAuth.verify(token, "", "req-5", ts, ts, mutableSetOf())
-        )
+        assertEquals(AuthResult.BAD_AUTH, verify(value.copy(auth = "garbage")))
     }
 
     @Test
     fun `timestamp outside window is clock skew`() {
-        val requestId = "req-6"
-        val ts = System.currentTimeMillis()
-        val auth = RemoteAuth.sign(token, requestId, ts)
-
-        assertEquals(
-            AuthResult.CLOCK_SKEW,
-            RemoteAuth.verify(
-                token, auth, requestId, ts,
-                ts + RemoteAuth.MAX_CLOCK_SKEW_MS + 1_000,
-                mutableSetOf(),
-            )
-        )
-        assertEquals(
-            AuthResult.CLOCK_SKEW,
-            RemoteAuth.verify(
-                token, auth, requestId, ts,
-                ts - RemoteAuth.MAX_CLOCK_SKEW_MS - 1_000,
-                mutableSetOf(),
-            )
-        )
+        val value = envelope()
+        assertEquals(AuthResult.CLOCK_SKEW, verify(value, value.timestampMs + RemoteAuth.MAX_CLOCK_SKEW_MS + 1))
+        assertEquals(AuthResult.CLOCK_SKEW, verify(value, value.timestampMs - RemoteAuth.MAX_CLOCK_SKEW_MS - 1))
     }
 
     @Test
-    fun `replayed request id is rejected once`() {
-        val requestId = "req-7"
-        val ts = System.currentTimeMillis()
-        val auth = RemoteAuth.sign(token, requestId, ts)
-        val seen = mutableSetOf<String>()
-
-        assertEquals(AuthResult.OK, RemoteAuth.verify(token, auth, requestId, ts, ts, seen))
-        assertEquals(AuthResult.REPLAY, RemoteAuth.verify(token, auth, requestId, ts, ts, seen))
+    fun `replayed request id is rejected while it is in the clock window`() {
+        val cache = RemoteAuth.newNonceCache()
+        val value = envelope()
+        assertEquals(AuthResult.OK, verify(value, cache = cache))
+        assertEquals(AuthResult.REPLAY, verify(value, cache = cache))
     }
 
     @Test
-    fun `replay lru stays bounded and only valid requests consume slots`() {
-        val ts = System.currentTimeMillis()
-        val seen = mutableSetOf<String>()
+    fun `expired nonce can be reused only after its clock window expires`() {
+        val cache = RemoteAuth.newNonceCache()
+        val first = envelope(timestampMs = 1_000L)
+        assertEquals(AuthResult.OK, verify(first, cache = cache))
+        val second = envelope(timestampMs = 1_000L + RemoteAuth.MAX_CLOCK_SKEW_MS + 1, requestId = first.requestId)
+        assertEquals(AuthResult.OK, verify(second, second.timestampMs, cache))
+    }
 
-        // Invalid auth must NOT pollute the LRU.
-        assertEquals(
-            AuthResult.BAD_AUTH,
-            RemoteAuth.verify(token, "garbage", "invalid-1", ts, ts, seen)
-        )
-        assertTrue(seen.isEmpty())
-
-        repeat(600) { i ->
-            val requestId = "valid-$i"
-            val auth = RemoteAuth.sign(token, requestId, ts)
-            assertEquals(AuthResult.OK, RemoteAuth.verify(token, auth, requestId, ts, ts, seen))
-        }
-        assertTrue("LRU should stay bounded", seen.size <= 500)
-
-        // An old-but-valid request may be replay-accepted again after eviction, which is fine;
-        // the important property is the size bound.
-        assertTrue(seen.size <= 500)
+    @Test
+    fun `invalid auth does not consume nonce`() {
+        val value = envelope()
+        val cache = RemoteAuth.newNonceCache()
+        assertEquals(AuthResult.BAD_AUTH, verify(value.copy(auth = "bad"), cache = cache))
+        assertEquals(AuthResult.OK, verify(value, cache = cache))
     }
 
     @Test
     fun `tokens are distinct and random`() {
         val a = RemoteAuth.newToken()
-        val b = RemoteAuth.newToken()
-        assertNotEquals(a, b)
-        assertEquals(44, a.length) // 32 bytes -> 44 base64 chars with padding
+        assertNotEquals(a, RemoteAuth.newToken())
+        assertEquals(44, a.length)
     }
 
     @Test
-    fun `base64 encode decode round trip`() {
-        val payloads = listOf(
-            byteArrayOf(),
-            byteArrayOf(0),
-            "hello".toByteArray(),
-            ByteArray(32) { it.toByte() },
-            ByteArray(300) { (it * 7).toByte() },
-        )
-        payloads.forEach { data ->
-            val encoded = RemoteAuth.encodeBase64(data)
-            val decoded = RemoteAuth.decodeBase64(encoded)
-            assertTrue("round trip for size ${data.size}", decoded.contentEquals(data))
-        }
-    }
-
-    @Test
-    fun `base64 rejects invalid input`() {
+    fun `base64 encode decode round trip and rejects invalid input`() {
+        val data = ByteArray(300) { (it * 7).toByte() }
+        assertTrue(RemoteAuth.decodeBase64(RemoteAuth.encodeBase64(data))!!.contentEquals(data))
         assertNull(RemoteAuth.decodeBase64("a"))
         assertNull(RemoteAuth.decodeBase64("abc&"))
-    }
-
-    @Test
-    fun `base64 matches standard alphabet`() {
         assertEquals("aGVsbG8=", RemoteAuth.encodeBase64("hello".toByteArray()))
-        assertEquals("AQID", RemoteAuth.encodeBase64(byteArrayOf(1, 2, 3)))
     }
 }

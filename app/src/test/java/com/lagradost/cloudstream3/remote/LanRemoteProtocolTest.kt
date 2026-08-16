@@ -12,8 +12,48 @@ import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.Socket
+import kotlinx.serialization.json.decodeFromJsonElement
 
 class LanRemoteProtocolTest {
+    @Test
+    fun `encrypted frame hides and authenticates its envelope`() {
+        val key = ByteArray(32) { it.toByte() }
+        val envelope = RemoteEnvelope(
+            deviceId = "phone-1",
+            type = RemoteMessageType.PLAY,
+            payload = encodePayload(KeyPayload(42)),
+        )
+        val bytes = ByteArrayOutputStream().also { output ->
+            LanRemoteProtocol.writeEncrypted(
+                DataOutputStream(output),
+                key,
+                envelope.deviceId,
+                LanRemoteProtocol.json.parseToJsonElement(LanRemoteProtocol.json.encodeToString(envelope)),
+            )
+        }.toByteArray()
+        val wire = bytes.toString(Charsets.UTF_8)
+        assertTrue(!wire.contains("keyCode"))
+        val decoded = LanRemoteProtocol.readDecrypted(DataInputStream(ByteArrayInputStream(bytes)), key).second
+        assertEquals(envelope, LanRemoteProtocol.json.decodeFromJsonElement<RemoteEnvelope>(decoded))
+    }
+
+    @Test
+    fun `pairing derives the same per-device key from ECDH and PIN proof`() {
+        val phone = RemoteCrypto.newPairingKeyPair()
+        val tv = RemoteCrypto.newPairingKeyPair()
+        val phoneKey = RemoteCrypto.derivePairingKey(
+            phone.private, tv.public, "123456", "session", "phone",
+        )
+        val tvKey = RemoteCrypto.derivePairingKey(
+            tv.private, phone.public, "123456", "session", "phone",
+        )
+        assertTrue(phoneKey.contentEquals(tvKey))
+        assertTrue(
+            RemoteCrypto.proof(phoneKey, "session", "phone") ==
+                RemoteCrypto.proof(tvKey, "session", "phone")
+        )
+    }
+
     @Test
     fun `request survives a framed round trip`() {
         val request = LanRemoteRequest(

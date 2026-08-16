@@ -13,6 +13,7 @@ import com.lagradost.cloudstream3.remote.ExtFileChunkPayload
 import com.lagradost.cloudstream3.remote.ExtFileEndPayload
 import com.lagradost.cloudstream3.remote.ExtFileStartPayload
 import com.lagradost.cloudstream3.remote.ExtensionSyncReply
+import com.lagradost.cloudstream3.remote.InputTextPayload
 import com.lagradost.cloudstream3.remote.KeyPayload
 import com.lagradost.cloudstream3.remote.LanRemoteProtocol
 import com.lagradost.cloudstream3.remote.LibrarySyncPayload
@@ -23,12 +24,17 @@ import com.lagradost.cloudstream3.remote.PlayerCmdPayload
 import com.lagradost.cloudstream3.remote.RemoteEnvelope
 import com.lagradost.cloudstream3.remote.RemoteMessageType
 import com.lagradost.cloudstream3.remote.RemoteReply
+import com.lagradost.cloudstream3.remote.SelectTrackPayload
+import com.lagradost.cloudstream3.remote.SelectPlaybackOptionPayload
 import com.lagradost.cloudstream3.remote.TextPayload
 import com.lagradost.cloudstream3.remote.encodePayload
+import com.lagradost.cloudstream3.remote.isInputTextWithinBound
 import com.lagradost.cloudstream3.remote.payloadAs
 import com.lagradost.cloudstream3.remote.sync.ExtensionSyncManager
 import com.lagradost.cloudstream3.remote.sync.LibrarySyncManager
 import com.lagradost.cloudstream3.ui.player.PlaybackCoordinator
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -55,6 +61,7 @@ object CommandHandlers {
         KeyEvent.KEYCODE_VOLUME_UP,
         KeyEvent.KEYCODE_VOLUME_DOWN,
         KeyEvent.KEYCODE_VOLUME_MUTE,
+        KeyEvent.KEYCODE_DEL,
     )
 
     suspend fun handle(context: Context, envelope: RemoteEnvelope): RemoteReply {
@@ -92,6 +99,23 @@ object CommandHandlers {
                 }
             }
 
+            RemoteMessageType.INPUT_TEXT -> {
+                val text = payload.payloadAs<InputTextPayload>()?.text
+                if (text == null) {
+                    err(envelope, "Invalid payload")
+                } else if (!isInputTextWithinBound(text)) {
+                    // Whole-string bound before EditText.setText: reject (accepted=false)
+                    // rather than truncating/splitting, so an oversized authenticated
+                    // INPUT_TEXT never reaches the focused view or a frame over the 1 MiB cap.
+                    err(envelope, "Input too large")
+                } else {
+                    // Whole-string replacement must inspect and mutate the focused view on
+                    // the main thread, and report success so the phone can surface failures.
+                    val applied = withContext(Dispatchers.Main) { applyInputText(text) }
+                    if (applied) ok(envelope) else err(envelope, "No editable text field focused")
+                }
+            }
+
             RemoteMessageType.PLAY -> {
                 val play = payload.payloadAs<PlayPayload>()
                 val safePlay = play?.copy(
@@ -123,9 +147,48 @@ object CommandHandlers {
                 val cmd = payload.payloadAs<PlayerCmdPayload>()
                 if (cmd == null) {
                     err(envelope, "Invalid command")
+                } else if (unsupportedPlayerCmd(cmd)) {
+                    // A fallback UNKNOWN action (a value this TV does not know, decoded
+                    // leniently from a newer phone) is rejected, never routed: a no-op
+                    // must not be acknowledged as success.
+                    err(envelope, "Unsupported command")
                 } else {
                     NowPlayingHub.routeCommand(cmd)
                     ok(envelope)
+                }
+            }
+
+            RemoteMessageType.SELECT_TRACK -> {
+                val selection = payload.payloadAs<SelectTrackPayload>()
+                if (selection == null || unsupportedSelectTrack(selection)) {
+                    err(envelope, "Unsupported track")
+                } else {
+                    val applied = withContext(Dispatchers.Main) {
+                        NowPlayingHub.selectTrack(selection)
+                    }
+                    if (applied) ok(envelope) else err(envelope, "Track unavailable")
+                }
+            }
+
+            RemoteMessageType.SELECT_PLAYBACK_OPTION -> {
+                val selection = payload.payloadAs<SelectPlaybackOptionPayload>()
+                if (selection == null || unsupportedPlaybackOption(selection)) {
+                    err(envelope, "Unsupported playback option")
+                } else when (selection.type) {
+                    SelectPlaybackOptionPayload.Type.SOURCE -> {
+                        val play = NowPlayingHub.selectSource(selection.index!!)
+                        if (play == null) err(envelope, "Source unavailable") else {
+                            PendingCommandQueue.submit(RemoteMessageType.PLAY, encodePayload(play), context)
+                            ok(envelope)
+                        }
+                    }
+                    SelectPlaybackOptionPayload.Type.SUBTITLE -> {
+                        val applied = withContext(Dispatchers.Main) {
+                            NowPlayingHub.selectSubtitle(selection.index)
+                        }
+                        if (applied) ok(envelope) else err(envelope, "Subtitle unavailable")
+                    }
+                    SelectPlaybackOptionPayload.Type.UNKNOWN -> err(envelope, "Unsupported playback option")
                 }
             }
 
@@ -135,7 +198,8 @@ object CommandHandlers {
             }
 
             RemoteMessageType.UNPAIR -> {
-                PairingManager.forgetPhone(envelope.deviceId)
+                // The request socket is revoked by the server after its acknowledgement is sent.
+                PairingManager.forgetPhone(envelope.deviceId, revokeSockets = false)
                 ok(envelope)
             }
 
@@ -161,7 +225,7 @@ object CommandHandlers {
                 if (start == null) {
                     err(envelope, "Invalid payload")
                 } else {
-                    val result = ExtensionSyncManager.extFileStart(context, start)
+                    val result = ExtensionSyncManager.extFileStart(context, envelope.deviceId, start)
                     result?.let { ok(envelope, encodePayload(it)) } ?: ok(envelope)
                 }
             }
@@ -171,7 +235,7 @@ object CommandHandlers {
                 if (chunk == null) {
                     err(envelope, "Invalid payload")
                 } else {
-                    val result = ExtensionSyncManager.extFileChunk(chunk)
+                    val result = ExtensionSyncManager.extFileChunk(envelope.deviceId, chunk)
                     result?.let { ok(envelope, encodePayload(it)) } ?: ok(envelope)
                 }
             }
@@ -181,7 +245,7 @@ object CommandHandlers {
                 if (end == null) {
                     err(envelope, "Invalid payload")
                 } else {
-                    val result = ExtensionSyncManager.extFileEnd(context, end)
+                    val result = ExtensionSyncManager.extFileEnd(context, envelope.deviceId, end)
                     result?.let { ok(envelope, encodePayload(it)) } ?: ok(envelope)
                 }
             }
@@ -208,6 +272,10 @@ object CommandHandlers {
                 DeviceInfo.CAP_EXT_SYNC,
                 DeviceInfo.CAP_LIB_SYNC,
                 DeviceInfo.CAP_PLAYER_CMD,
+                DeviceInfo.CAP_INPUT_TEXT,
+                DeviceInfo.CAP_INPUT_CONTEXT,
+                DeviceInfo.CAP_TRACKS,
+                DeviceInfo.CAP_PLAYBACK_CHOICES,
             )
         } else {
             emptySet()
@@ -226,6 +294,19 @@ object CommandHandlers {
     }
 
     // ------------------------------------------------------------------
+
+    private fun unsupportedSelectTrack(selection: SelectTrackPayload): Boolean = when (selection.type) {
+        SelectTrackPayload.TrackType.VIDEO,
+        SelectTrackPayload.TrackType.AUDIO -> selection.id.isNullOrBlank()
+        SelectTrackPayload.TrackType.TEXT -> selection.id != null
+        SelectTrackPayload.TrackType.UNKNOWN -> true
+    }
+
+    private fun unsupportedPlaybackOption(selection: SelectPlaybackOptionPayload): Boolean = when (selection.type) {
+        SelectPlaybackOptionPayload.Type.SOURCE -> selection.index == null || selection.index < 0
+        SelectPlaybackOptionPayload.Type.SUBTITLE -> selection.index != null && selection.index < 0
+        SelectPlaybackOptionPayload.Type.UNKNOWN -> true
+    }
 
     private fun dispatchKey(context: Context, keyCode: Int) {
         if (keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
@@ -259,12 +340,41 @@ object CommandHandlers {
         events.forEach(activity::dispatchKeyEvent)
     }
 
+    /**
+     * Replaces the whole text of the currently focused editable field (SearchView included),
+     * Unicode-safe because the string is never sliced char-by-char, clears on empty input,
+     * and leaves the cursor at the end. Returns false when no editable view is focused.
+     */
+    private fun applyInputText(text: String): Boolean {
+        val activity = CommonActivity.activity ?: return false
+        val view = activity.currentFocus ?: return false
+        val edit = when (view) {
+            is android.widget.EditText -> view
+            is androidx.appcompat.widget.SearchView ->
+                view.findViewById<android.widget.EditText>(androidx.appcompat.R.id.search_src_text)
+            else -> null
+        } ?: return false
+        if (!edit.hasFocus()) return false
+        edit.setText(text)
+        edit.setSelection(edit.text.length)
+        return true
+    }
+
     private fun launchApp(context: Context) {
         val intent = context.packageManager.getLaunchIntentForPackage(context.packageName) ?: return
         intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
             android.content.Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
         context.startActivity(intent)
     }
+
+    /**
+     * Pure gate for PLAYER_CMD (server-feasible test target): a null payload or the lenient
+     * fallback [PlayerCmdPayload.Action.UNKNOWN] (a value this TV does not know, decoded from
+     * a newer phone) is answered accepted=false and never routed — a no-op must not be
+     * acknowledged as success.
+     */
+    internal fun unsupportedPlayerCmd(cmd: PlayerCmdPayload?): Boolean =
+        cmd == null || cmd.action == PlayerCmdPayload.Action.UNKNOWN
 
     private fun ok(envelope: RemoteEnvelope, payload: JsonObject? = null) = RemoteReply(
         requestId = envelope.requestId,

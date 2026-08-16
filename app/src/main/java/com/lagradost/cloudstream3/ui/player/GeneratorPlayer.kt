@@ -47,6 +47,7 @@ import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.APIHolder.getApiFromNameNull
+import com.lagradost.cloudstream3.actions.temp.CloudStreamPackage
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.setKey
 import com.lagradost.cloudstream3.CommonActivity.showToast
@@ -134,6 +135,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import com.lagradost.cloudstream3.remote.server.PlaybackReporter
+import com.lagradost.cloudstream3.remote.PlayPayload
 import java.io.Serializable
 import java.lang.ref.WeakReference
 import java.util.Calendar
@@ -224,6 +226,7 @@ class GeneratorPlayer : FullScreenPlayer() {
 
     override fun onTracksInfoChanged() {
         val tracks = player.getVideoTracks()
+        PlaybackReporter.reportTracks(tracks)
         playerBinding?.playerTracksBtt?.isVisible =
             tracks.allVideoTracks.size > 1 || tracks.allAudioTracks.size > 1
         // Only set the preferred language if it is available.
@@ -519,6 +522,10 @@ class GeneratorPlayer : FullScreenPlayer() {
         //  setEpisodes(viewModel.getAllMeta() ?: emptyList())
         setPlayerDimen(null)
         setTitle()
+        PlaybackReporter.reportMetadata(
+            title = getPlayerVideoTitle().ifBlank { getHeaderName() },
+            streamName = link.first?.name ?: link.second?.name,
+        )
         if (!sameEpisode)
             hasRequestedStamps = false
 
@@ -1616,6 +1623,26 @@ class GeneratorPlayer : FullScreenPlayer() {
 
         val links = viewModel.state.sortLinks(currentQualityProfile)
 
+        PlaybackReporter.reportPlaybackChoices(
+            PlayPayload(
+                links = links.mapNotNull { display ->
+                    display.link.first?.let { CloudStreamPackage.MinimalVideoLink.fromExtractor(it) }
+                        ?: display.link.second?.let { uri ->
+                            CloudStreamPackage.MinimalVideoLink(
+                                uri = uri.uri,
+                                url = null,
+                                name = uri.name,
+                                quality = null,
+                            )
+                        }
+                },
+                subtitles = viewModel.state.subtitles.map {
+                    CloudStreamPackage.MinimalSubtitleLink.fromSubtitle(it)
+                },
+                title = getPlayerVideoTitle().ifBlank { getHeaderName() },
+            )
+        )
+
         val firstAvailableLink = links.firstOrNull { it.shouldUseLink }?.link
         if (firstAvailableLink == null) {
             noLinksFound()
@@ -1730,6 +1757,20 @@ class GeneratorPlayer : FullScreenPlayer() {
         // Don't save NSFW data
         if ((currentMeta as? ResultEpisode)?.tvType == TvType.NSFW) return
 
+        // Keep companion now-playing state alive while ExoPlayer is still resolving a timeline.
+        // Resume persistence below still requires a real positive duration.
+        runCatching {
+            PlaybackReporter.reportMetadata(
+                title = getPlayerVideoTitle().ifBlank { getHeaderName() },
+                streamName = currentSelectedLink?.first?.name ?: currentSelectedLink?.second?.name,
+            )
+            PlaybackReporter.reportState(
+                position,
+                duration.coerceAtLeast(0L),
+                PlaybackReporter.playingState(player),
+            )
+        }
+
         if (duration <= 0L) return // idk how you achieved this, but div by zero crash
         if (!hasRequestedStamps) {
             hasRequestedStamps = true
@@ -1753,11 +1794,6 @@ class GeneratorPlayer : FullScreenPlayer() {
             currentMeta,
             nextMeta
         )
-
-        // Companion: throttled now-playing state for subscribed phones (plan §6.3).
-        runCatching {
-            PlaybackReporter.reportState(position, duration, PlaybackReporter.playingState(player))
-        }
 
         var isOpVisible = false
         when (val meta = currentMeta) {
@@ -2218,6 +2254,7 @@ class GeneratorPlayer : FullScreenPlayer() {
 
     @MainThread
     fun releasePlayer() {
+        PlaybackReporter.unregisterPlayer(player)
         player.release()
         currentSelectedSubtitles = null
         currentSelectedLink = null

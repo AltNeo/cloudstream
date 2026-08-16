@@ -133,6 +133,69 @@
         </LinearLayout>
 
         <LinearLayout
+            android:id="@+id/companion_input_bar"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:background="?attr/primaryGrayBackground"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:visibility="gone"
+            app:layout_constraintBottom_toTopOf="@+id/companion_now_playing_bar"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toEndOf="@+id/nav_rail_view"
+            tools:visibility="visible">
+
+            <ImageView
+                android:id="@+id/companion_input_icon"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:contentDescription="@null"
+                android:src="@drawable/ic_baseline_edit_24"
+                app:tint="?attr/textColor" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/companion_input_label"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:singleLine="true"
+                    android:textColor="?attr/textColor"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    tools:text="Search" />
+
+                <TextView
+                    android:id="@+id/companion_input_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:singleLine="true"
+                    android:textColor="?attr/grayTextColor"
+                    android:textSize="12sp"
+                    tools:text="Start typing on your phone…" />
+            </LinearLayout>
+
+            <ImageView
+                android:id="@+id/companion_input_chevron"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:contentDescription="@string/companion_input_open"
+                android:src="@drawable/round_keyboard_arrow_up_24"
+                app:tint="?attr/grayTextColor" />
+        </LinearLayout>
+
+        <LinearLayout
             android:id="@+id/cast_mini_controller_holder"
             android:layout_width="0dp"
             android:layout_height="wrap_content"

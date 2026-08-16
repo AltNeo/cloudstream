@@ -10,6 +10,7 @@ import androidx.core.app.NotificationCompat
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.remote.NowPlayingPayload
 import com.lagradost.cloudstream3.remote.formatPlaybackTime
+import com.lagradost.cloudstream3.remote.isActive
 
 /**
  * Minimal now-playing notification for the phone role (plan §6.5): shown while the paired
@@ -22,10 +23,7 @@ object CompanionNotificationManager {
 
     /** Shows/updates the notification, or cancels it when playback ended or the state is gone. */
     fun update(context: Context, payload: NowPlayingPayload?) {
-        if (payload == null ||
-            payload.state == NowPlayingPayload.State.IDLE ||
-            payload.state == NowPlayingPayload.State.ENDED
-        ) {
+        if (payload == null || !payload.state.isActive) {
             cancel(context)
             return
         }

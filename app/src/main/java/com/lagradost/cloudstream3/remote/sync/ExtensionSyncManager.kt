@@ -22,6 +22,7 @@ import com.lagradost.cloudstream3.remote.payloadAs
 import com.lagradost.cloudstream3.remote.server.NowPlayingHub
 import java.io.File
 import java.security.MessageDigest
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -39,6 +40,9 @@ import java.util.concurrent.ConcurrentHashMap
 object ExtensionSyncManager {
     const val SYNCED_PLUGINS_KEY = "companion/synced_plugins"
     private const val MAX_CHUNK_BYTES = 384 * 1024
+    private const val MAX_TRANSFER_BYTES = 64L * 1024 * 1024
+    private const val MAX_TRANSFER_BYTES_TOTAL = 128L * 1024 * 1024
+    private const val TRANSFER_EXPIRY_MS = 10 * 60 * 1000L
 
     // ------------------------------------------------------------------
     // Phone side — payload construction
@@ -287,49 +291,72 @@ object ExtensionSyncManager {
         val expectedSize: Long,
         val expectedSha256: String,
         val tempFile: File,
+        var nextSeq: Int = 0,
+        val createdAtMs: Long = System.currentTimeMillis(),
     )
 
     private val transfers = ConcurrentHashMap<String, FileTransfer>()
+    private fun transferKey(deviceId: String, transferId: String) = "$deviceId:$transferId"
 
-    fun extFileStart(context: Context, payload: ExtFileStartPayload): PluginSyncResult? {
-        val tempFile = File.createTempFile("ext-${payload.internalName}", ".cs3", context.cacheDir)
-        transfers[payload.internalName] = FileTransfer(
-            payload.internalName,
-            payload.repositoryUrl,
-            payload.sizeBytes,
-            payload.sha256,
-            tempFile,
-        )
+    private fun cleanupExpiredTransfers() {
+        val cutoff = System.currentTimeMillis() - TRANSFER_EXPIRY_MS
+        transfers.entries.removeIf { (_, transfer) ->
+            if (transfer.createdAtMs < cutoff) { transfer.tempFile.delete(); true } else false
+        }
+    }
+
+    fun extFileStart(context: Context, deviceId: String, payload: ExtFileStartPayload): PluginSyncResult? {
+        cleanupExpiredTransfers()
+        if (payload.transferId.isBlank() || payload.sizeBytes !in 1..MAX_TRANSFER_BYTES) {
+            return PluginSyncResult(payload.internalName, PluginSyncResult.Status.FAILED, "invalid-size")
+        }
+        if (transfers.values.sumOf { it.expectedSize } + payload.sizeBytes > MAX_TRANSFER_BYTES_TOTAL) {
+            return PluginSyncResult(payload.internalName, PluginSyncResult.Status.FAILED, "quota")
+        }
+        val tempFile = File.createTempFile("ext-${payload.transferId}-", ".cs3", context.cacheDir)
+        transfers.put(transferKey(deviceId, payload.transferId), FileTransfer(
+            payload.internalName, payload.repositoryUrl, payload.sizeBytes, payload.sha256, tempFile,
+        ))?.tempFile?.delete()
         return null // accepted
     }
 
-    fun extFileChunk(payload: ExtFileChunkPayload): PluginSyncResult? {
-        val transfer = transfers[payload.internalName] ?: return PluginSyncResult(
-            payload.internalName, PluginSyncResult.Status.FAILED, "no-transfer",
+    fun extFileChunk(deviceId: String, payload: ExtFileChunkPayload): PluginSyncResult? {
+        cleanupExpiredTransfers()
+        val transfer = transfers[transferKey(deviceId, payload.transferId)] ?: return PluginSyncResult(
+            payload.transferId, PluginSyncResult.Status.FAILED, "no-transfer",
+        )
+        if (payload.seq != transfer.nextSeq || payload.seq < 0) return PluginSyncResult(
+            transfer.internalName, PluginSyncResult.Status.FAILED, "invalid-seq",
         )
         val bytes = RemoteAuth.decodeBase64(payload.dataB64) ?: return PluginSyncResult(
-            payload.internalName, PluginSyncResult.Status.FAILED, "bad-chunk",
+            transfer.internalName, PluginSyncResult.Status.FAILED, "bad-chunk",
         )
         val file = transfer.tempFile
-        if (file.length() + bytes.size > transfer.expectedSize) {
-            return PluginSyncResult(payload.internalName, PluginSyncResult.Status.FAILED, "oversize")
+        if (bytes.size > MAX_CHUNK_BYTES || file.length() + bytes.size > transfer.expectedSize) {
+            transfers.remove(transferKey(deviceId, payload.transferId))?.tempFile?.delete()
+            return PluginSyncResult(transfer.internalName, PluginSyncResult.Status.FAILED, "oversize")
         }
-        runCatching { file.appendBytes(bytes) }
+        runCatching { file.appendBytes(bytes) }.onFailure {
+            transfers.remove(transferKey(deviceId, payload.transferId))?.tempFile?.delete()
+            return PluginSyncResult(transfer.internalName, PluginSyncResult.Status.FAILED, "write")
+        }
+        transfer.nextSeq++
         return null
     }
 
-    suspend fun extFileEnd(context: Context, payload: ExtFileEndPayload): PluginSyncResult? {
-        val transfer = transfers.remove(payload.internalName) ?: return PluginSyncResult(
-            payload.internalName, PluginSyncResult.Status.FAILED, "no-transfer",
+    suspend fun extFileEnd(context: Context, deviceId: String, payload: ExtFileEndPayload): PluginSyncResult? {
+        cleanupExpiredTransfers()
+        val transfer = transfers.remove(transferKey(deviceId, payload.transferId)) ?: return PluginSyncResult(
+            payload.transferId, PluginSyncResult.Status.FAILED, "no-transfer",
         )
         val file = transfer.tempFile
         if (file.length() != transfer.expectedSize) {
             file.delete()
-            return PluginSyncResult(payload.internalName, PluginSyncResult.Status.FAILED, "size-mismatch")
+            return PluginSyncResult(transfer.internalName, PluginSyncResult.Status.FAILED, "size-mismatch")
         }
         if (transfer.expectedSha256.isNotBlank() && RepositoryManager.sha256(file) != transfer.expectedSha256) {
             file.delete()
-            return PluginSyncResult(payload.internalName, PluginSyncResult.Status.FAILED, "hash-mismatch")
+            return PluginSyncResult(transfer.internalName, PluginSyncResult.Status.FAILED, "hash-mismatch")
         }
         val destination = PluginManager.getPluginPath(
             context, transfer.internalName, transfer.repositoryUrl
@@ -339,7 +366,7 @@ object ExtensionSyncManager {
             file.copyTo(destination, overwrite = true)
             file.delete()
         }.onFailure {
-            return PluginSyncResult(payload.internalName, PluginSyncResult.Status.FAILED, "move")
+            return PluginSyncResult(transfer.internalName, PluginSyncResult.Status.FAILED, "move")
         }
         val data = PluginData(
             internalName = transfer.internalName,
@@ -378,7 +405,13 @@ object ExtensionSyncManager {
     // Fallback file transfer: phone push side
     // ------------------------------------------------------------------
 
-    suspend fun pushPlugin(context: Context, tv: PairedTv, internalName: String): PluginSyncResult? {
+    suspend fun pushPlugin(
+        context: Context,
+        tv: PairedTv,
+        internalName: String,
+        stillCurrent: () -> Boolean = { true },
+    ): PluginSyncResult? {
+        if (!stillCurrent()) return null
         val plugin = PluginManager.getPluginsOnline().firstOrNull { it.internalName == internalName }
             ?: return PluginSyncResult(internalName, PluginSyncResult.Status.FAILED, "not-installed")
         val file = File(plugin.filePath)
@@ -386,30 +419,36 @@ object ExtensionSyncManager {
             return PluginSyncResult(internalName, PluginSyncResult.Status.FAILED, "file-missing")
         }
         val sha = RepositoryManager.sha256(file)
+        val transferId = UUID.randomUUID().toString()
         val startReply = LanRemoteClient.send(
             tv, RemoteMessageType.EXT_FILE_START,
-            ExtFileStartPayload(plugin.internalName, plugin.repositoryUrl ?: "", file.length(), sha),
+            ExtFileStartPayload(transferId, plugin.internalName, plugin.repositoryUrl ?: "", file.length(), sha),
         )
+        if (!stillCurrent()) return null
         if (!startReply.accepted) return PluginSyncResult(internalName, PluginSyncResult.Status.FAILED, startReply.error)
 
         var seq = 0
         file.inputStream().use { input ->
             val buffer = ByteArray(MAX_CHUNK_BYTES)
             while (true) {
+                if (!stillCurrent()) return null
                 val read = input.read(buffer)
                 if (read <= 0) break
                 val chunkReply = LanRemoteClient.send(
                     tv, RemoteMessageType.EXT_FILE_CHUNK,
-                    ExtFileChunkPayload(plugin.internalName, seq++, RemoteAuth.encodeBase64(buffer.copyOf(read))),
+                    ExtFileChunkPayload(transferId, seq++, RemoteAuth.encodeBase64(buffer.copyOf(read))),
                 )
+                if (!stillCurrent()) return null
                 if (!chunkReply.accepted) {
                     return PluginSyncResult(internalName, PluginSyncResult.Status.FAILED, chunkReply.error)
                 }
             }
         }
+        if (!stillCurrent()) return null
         val endReply = LanRemoteClient.send(
-            tv, RemoteMessageType.EXT_FILE_END, ExtFileEndPayload(plugin.internalName),
+            tv, RemoteMessageType.EXT_FILE_END, ExtFileEndPayload(transferId),
         )
+        if (!stillCurrent()) return null
         if (!endReply.accepted) return PluginSyncResult(internalName, PluginSyncResult.Status.FAILED, endReply.error)
         return endReply.payloadAs<PluginSyncResult>()
     }

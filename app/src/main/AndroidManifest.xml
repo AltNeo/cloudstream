@@ -197,6 +197,39 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+            <intent-filter android:label="@string/companion_share_confirm">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter android:label="@string/companion_share_confirm">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="application/dash+xml" />
+                <data android:mimeType="application/x-mpegURL" />
+                <data android:mimeType="application/vnd.apple.mpegurl" />
+            </intent-filter>
+            <intent-filter android:label="@string/companion_share_confirm">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" android:host="*" android:pathPattern=".*\.mp4" />
+                <data android:scheme="https" android:host="*" android:pathPattern=".*\.mp4" />
+                <data android:scheme="http" android:host="*" android:pathPattern=".*\.m4v" />
+                <data android:scheme="https" android:host="*" android:pathPattern=".*\.m4v" />
+                <data android:scheme="http" android:host="*" android:pathPattern=".*\.webm" />
+                <data android:scheme="https" android:host="*" android:pathPattern=".*\.webm" />
+                <data android:scheme="http" android:host="*" android:pathPattern=".*\.mkv" />
+                <data android:scheme="https" android:host="*" android:pathPattern=".*\.mkv" />
+                <data android:scheme="http" android:host="*" android:pathPattern=".*\.m3u8" />
+                <data android:scheme="https" android:host="*" android:pathPattern=".*\.m3u8" />
+                <data android:scheme="http" android:host="*" android:pathPattern=".*\.mpd" />
+                <data android:scheme="https" android:host="*" android:pathPattern=".*\.mpd" />
+            </intent-filter>
 
             <!-- cloudstreamplayer://encodedUrl?name=Dune -->
             <intent-filter>

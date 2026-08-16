@@ -4,6 +4,7 @@ import android.content.Context
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.context as appContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.decodeFromJsonElement
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.InetSocketAddress
@@ -17,6 +18,26 @@ data class LanRemoteEndpoint(
     val port: Int = LanRemoteProtocol.PORT,
 )
 
+fun parseLanRemoteAddress(input: String, defaultPort: Int = LanRemoteProtocol.PORT): Pair<String, Int>? {
+    val value = input.trim()
+    if (value.isBlank()) return null
+    if (value.startsWith("[")) {
+        val close = value.indexOf(']')
+        if (close <= 1) return null
+        val host = value.substring(1, close)
+        val port = when {
+            close == value.lastIndex -> defaultPort
+            value.getOrNull(close + 1) == ':' -> value.substring(close + 2).toIntOrNull() ?: return null
+            else -> return null
+        }
+        return host to port
+    }
+    if (value.count { it == ':' } > 1) return value to defaultPort
+    val separator = value.lastIndexOf(':')
+    if (separator < 0) return value to defaultPort
+    return value.substring(0, separator).trim() to (value.substring(separator + 1).toIntOrNull() ?: return null)
+}
+
 object LanRemoteClient {
     private const val CONNECT_TIMEOUT_MS = 2_000
     private const val READ_TIMEOUT_MS = 5_000
@@ -29,15 +50,18 @@ object LanRemoteClient {
     ): RemoteReply = withContext(Dispatchers.IO) {
         val requestId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
-        val envelope = RemoteEnvelope(
+        val unsigned = RemoteEnvelope(
             requestId = requestId,
             deviceId = PairingManager.myDeviceId(appContext ?: throw IllegalStateException("No app context")),
             timestampMs = now,
-            auth = RemoteAuth.sign(tv.token, requestId, now),
             type = type,
             payload = payload?.let { encodePayloadForMessage(type, it) },
         )
-        sendRaw(tv.host, tv.port, envelope)
+        val envelope = unsigned.copy(auth = RemoteAuth.sign(tv.token, unsigned))
+        val key = RemoteAuth.decodeBase64(tv.sessionKey)
+            ?.takeIf { it.size == 32 }
+            ?: throw IllegalStateException("Pairing must be renewed for encrypted transport")
+        sendRaw(tv.host, tv.port, envelope, key)
     }
 
     /** Unauthenticated send (PING / PAIR_*). */
@@ -46,6 +70,7 @@ object LanRemoteClient {
         port: Int,
         type: RemoteMessageType,
         payload: Any? = null,
+        responseKey: ByteArray? = null,
     ): RemoteReply = withContext(Dispatchers.IO) {
         val envelope = RemoteEnvelope(
             requestId = UUID.randomUUID().toString(),
@@ -55,7 +80,7 @@ object LanRemoteClient {
             type = type,
             payload = payload?.let { encodePayloadForMessage(type, it) },
         )
-        sendRaw(host, port, envelope)
+        sendRaw(host, port, envelope, transportKey = null, responseKey = responseKey)
     }
 
     /** v2 PING to a specific TV. */
@@ -83,17 +108,41 @@ object LanRemoteClient {
         return host to port
     }
 
-    private suspend fun sendRaw(host: String, port: Int, envelope: RemoteEnvelope): RemoteReply =
-        withContext(Dispatchers.IO) {
-            Socket().use { socket ->
-                socket.soTimeout = READ_TIMEOUT_MS
-                socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-                LanRemoteProtocol.write(DataOutputStream(socket.getOutputStream()), envelope)
-                LanRemoteProtocol.read<RemoteReply>(DataInputStream(socket.getInputStream()))
+    private suspend fun sendRaw(
+        host: String,
+        port: Int,
+        envelope: RemoteEnvelope,
+        transportKey: ByteArray?,
+        responseKey: ByteArray? = transportKey,
+    ): RemoteReply = withContext(Dispatchers.IO) {
+        Socket().use { socket ->
+            socket.soTimeout = READ_TIMEOUT_MS
+            socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+            val output = DataOutputStream(socket.getOutputStream())
+            if (transportKey == null) {
+                LanRemoteProtocol.write(output, envelope)
+            } else {
+                LanRemoteProtocol.writeEncrypted(
+                    output,
+                    transportKey,
+                    envelope.deviceId,
+                    LanRemoteProtocol.json.parseToJsonElement(
+                        LanRemoteProtocol.json.encodeToString(envelope)
+                    ),
+                )
+            }
+            val input = DataInputStream(socket.getInputStream())
+            if (responseKey == null) {
+                LanRemoteProtocol.read(input)
+            } else {
+                LanRemoteProtocol.readDecrypted(input, responseKey).second.let {
+                    LanRemoteProtocol.json.decodeFromJsonElement<RemoteReply>(it)
+                }
             }
         }
+    }
 
-    private fun encodePayloadForMessage(type: RemoteMessageType, payload: Any) = when (type) {
+    internal fun encodePayloadForMessage(type: RemoteMessageType, payload: Any) = when (type) {
         RemoteMessageType.PAIR_HELLO -> encodePayload(payload as PairHelloRequest)
         RemoteMessageType.PAIR_VERIFY -> encodePayload(payload as PairVerifyRequest)
         RemoteMessageType.KEY -> encodePayload(payload as KeyPayload)
@@ -106,6 +155,10 @@ object LanRemoteClient {
         RemoteMessageType.EXT_FILE_CHUNK -> encodePayload(payload as ExtFileChunkPayload)
         RemoteMessageType.EXT_FILE_END -> encodePayload(payload as ExtFileEndPayload)
         RemoteMessageType.SYNC_LIBRARY -> encodePayload(payload as LibrarySyncPayload)
+        RemoteMessageType.SUBSCRIBE -> encodePayload(payload as SubscribePayload)
+        RemoteMessageType.INPUT_TEXT -> encodePayload(payload as InputTextPayload)
+        RemoteMessageType.SELECT_TRACK -> encodePayload(payload as SelectTrackPayload)
+        RemoteMessageType.SELECT_PLAYBACK_OPTION -> encodePayload(payload as SelectPlaybackOptionPayload)
         else -> error("Unsupported payload for message: $type")
     }
 }

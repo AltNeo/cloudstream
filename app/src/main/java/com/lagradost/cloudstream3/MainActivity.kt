@@ -89,11 +89,18 @@ import com.lagradost.cloudstream3.mvvm.observeNullable
 import com.lagradost.cloudstream3.network.initClient
 import com.lagradost.cloudstream3.plugins.PluginManager
 import com.lagradost.cloudstream3.remote.CompanionSessionManager
+import com.lagradost.cloudstream3.remote.buildSharePlayPayload
+import com.lagradost.cloudstream3.remote.classifySharedUrl
+import com.lagradost.cloudstream3.remote.InputContextPayload
 import com.lagradost.cloudstream3.remote.LanRemoteService
 import com.lagradost.cloudstream3.remote.NowPlayingPayload
 import com.lagradost.cloudstream3.remote.PairingManager
 import com.lagradost.cloudstream3.remote.PlayerCmdPayload
 import com.lagradost.cloudstream3.remote.RemoteMessageType
+import com.lagradost.cloudstream3.remote.RemoteState
+import com.lagradost.cloudstream3.remote.isActive
+import com.lagradost.cloudstream3.remote.sharedUrlCandidate
+import com.lagradost.cloudstream3.remote.ui.CompanionInputFragment
 import com.lagradost.cloudstream3.remote.ui.CompanionNowPlayingFragment
 import com.lagradost.cloudstream3.plugins.PluginManager.___DO_NOT_CALL_FROM_A_PLUGIN_loadAllOnlinePlugins
 import com.lagradost.cloudstream3.plugins.PluginManager.loadSinglePlugin
@@ -190,6 +197,7 @@ import com.lagradost.cloudstream3.utils.txt
 import com.lagradost.safefile.SafeFile
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -204,6 +212,9 @@ import kotlin.reflect.full.createInstance
 import kotlin.system.exitProcess
 
 class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCallback {
+    private var lastCompanionShareKey: String? = null
+    private var lastCompanionShareAtMs = 0L
+
     companion object {
         var activityResultLauncher: ActivityResultLauncher<Intent>? = null
 
@@ -747,6 +758,7 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
     }
 
     override fun onNewIntent(intent: Intent) {
+        setIntent(intent)
         handleAppIntent(intent)
         super.onNewIntent(intent)
     }
@@ -770,6 +782,42 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
         }
     }
 
+    // ------------------------------------------------------------------
+    // Companion reactive input bar (plan F1, checkpoint 3, phone role)
+    // ------------------------------------------------------------------
+
+    private fun setupCompanionInput() {
+        binding?.companionInputBar?.setOnClickListener {
+            CompanionInputFragment().show(supportFragmentManager, "companion_input")
+        }
+        lifecycleScope.launch {
+            CompanionSessionManager.state.collect { state -> updateCompanionInputBar(state) }
+        }
+    }
+
+    /**
+     * Compact affordance shown while the TV reports an active SEARCH_FIELD: the phone can type
+     * into the TV's search. Capability-gated — it only appears when the TV is online and
+     * advertised whole-string INPUT_TEXT support, and it hides the moment the TV loses the field
+     * or the connection drops.
+     */
+    private fun updateCompanionInputBar(state: RemoteState) {
+        val bar = binding?.companionInputBar ?: return
+        val ctx = state.inputContext
+        val show = ctx != null &&
+            ctx.context == InputContextPayload.Context.SEARCH_FIELD &&
+            state.canSendInputText
+        if (!show) {
+            bar.isVisible = false
+            return
+        }
+        bar.isVisible = true
+        binding?.companionInputLabel?.text = ctx.label
+            ?: getString(R.string.companion_input_bar_label)
+        binding?.companionInputText?.text = ctx.currentText?.takeIf { it.isNotBlank() }
+            ?: getString(R.string.companion_input_bar_hint)
+    }
+
     private fun sendCompanionCmd(action: PlayerCmdPayload.Action) {
         lifecycleScope.launch {
             runCatching {
@@ -789,16 +837,16 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
 
     private fun updateCompanionNowPlayingBar(payload: NowPlayingPayload?) {
         val bar = binding?.companionNowPlayingBar ?: return
-        val show = payload != null &&
-            payload.state != NowPlayingPayload.State.IDLE &&
-            payload.state != NowPlayingPayload.State.ENDED
+        val show = payload != null && payload.state.isActive
         if (!show) {
             bar.isVisible = false
             return
         }
         bar.isVisible = true
-        binding?.companionNowPlayingTitle?.text = payload.title ?: payload.episodeName ?: ""
-        binding?.companionNowPlayingStatus?.text = getString(R.string.companion_now_playing_status)
+        binding?.companionNowPlayingTitle?.text = payload.title ?: payload.streamName
+            ?: payload.episodeName ?: getString(R.string.companion_now_playing_title)
+        binding?.companionNowPlayingStatus?.text = payload.streamName?.takeIf { it.isNotBlank() }
+            ?: getString(R.string.companion_now_playing_status)
         binding?.companionNowPlayingPoster?.loadImage(payload.poster)
         binding?.companionNowPlayingPlayPause?.setImageResource(
             if (payload.state == NowPlayingPayload.State.PLAYING) {
@@ -811,10 +859,79 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
 
     private fun handleAppIntent(intent: Intent?) {
         if (intent == null) return
+        if (handleCompanionShareIntent(intent)) return
         val str = intent.dataString
         loadCache()
 
         handleAppIntentUrl(this, str, false, intent.extras)
+    }
+
+    /**
+     * Handles explicit shares only: never reads the clipboard and never resolves provider pages.
+     * The intent is consumed before asynchronous work starts so rotation/new delivery cannot
+     * duplicate a PLAY. Confirmation remains mandatory even for a valid direct media URL.
+     */
+    private fun handleCompanionShareIntent(incoming: Intent): Boolean {
+        val action = incoming.action
+        val raw = when (action) {
+            Intent.ACTION_SEND -> incoming.getStringExtra(Intent.EXTRA_TEXT)
+                ?.takeIf { incoming.type == "text/plain" }
+            Intent.ACTION_VIEW -> incoming.dataString?.takeIf { rawUrl ->
+                rawUrl.toUri().scheme?.lowercase() in setOf("http", "https")
+            }
+            else -> return false
+        }
+        // This surface is phone-only. On a TV, preserve the app's existing deep-link/player
+        // routing instead of consuming an intent merely because the shared APK declares it.
+        if (PairingManager.isTelevision(this)) return false
+        val shared = classifySharedUrl(sharedUrlCandidate(raw))
+        // A custom deep link or ordinary provider URL still belongs to the existing app-intent
+        // router. Only ACTION_SEND owns invalid input and surfaces the direct-media policy.
+        if (action == Intent.ACTION_VIEW && shared == null) return false
+        incoming.action = null
+        incoming.data = null
+        incoming.removeExtra(Intent.EXTRA_TEXT)
+        if (shared == null) {
+            showToast(R.string.companion_share_invalid)
+            return true
+        }
+        val now = System.currentTimeMillis()
+        val shareKey = "$action\u0000${shared.url}"
+        if (shareKey == lastCompanionShareKey && now - lastCompanionShareAtMs < 2_000L) {
+            return true
+        }
+        lastCompanionShareKey = shareKey
+        lastCompanionShareAtMs = now
+        lifecycleScope.launch {
+            var attempts = 0
+            while (!CompanionSessionManager.tvOnline.value && attempts < 12) {
+                delay(500)
+                attempts += 1
+            }
+            if (!CompanionSessionManager.tvOnline.value) {
+                showToast(R.string.companion_share_offline)
+                return@launch
+            }
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle(R.string.companion_share_title)
+                .setMessage(shared.url)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.companion_share_confirm) { _, _ ->
+                    lifecycleScope.launch {
+                        val reply = runCatching {
+                            CompanionSessionManager.send(
+                                RemoteMessageType.PLAY,
+                                buildSharePlayPayload(shared),
+                            )
+                        }.getOrNull()
+                        if (reply?.accepted != true) {
+                            showToast(reply?.error ?: getString(R.string.companion_open_failed))
+                        }
+                    }
+                }
+                .show()
+        }
+        return true
     }
 
     private fun NavDestination.matchDestination(@IdRes destId: Int): Boolean =
@@ -2068,6 +2185,7 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
         if (!PairingManager.isTelevision(this)) {
             CompanionSessionManager.start(this)
             setupCompanionNowPlaying()
+            setupCompanionInput()
         }
 
         APIRepository.dubStatusActive = getApiDubstatusSettings()

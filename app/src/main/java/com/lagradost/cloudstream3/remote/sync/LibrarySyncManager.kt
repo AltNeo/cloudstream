@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.remote.LanRemoteProtocol
 import com.lagradost.cloudstream3.remote.LibraryEntry
 import com.lagradost.cloudstream3.remote.LibrarySyncPayload
 import com.lagradost.cloudstream3.remote.PairingManager
+import com.lagradost.cloudstream3.remote.PairedTv
 import com.lagradost.cloudstream3.remote.RemoteEvent
 import com.lagradost.cloudstream3.remote.RemoteMessageType
 import com.lagradost.cloudstream3.remote.payloadAs
@@ -33,6 +34,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import java.security.MessageDigest
 
 /**
@@ -54,6 +58,9 @@ object LibrarySyncManager {
     /** Full-dump payloads larger than this are sent as several bounded pages instead. */
     private const val MAX_SAFE_PAYLOAD_BYTES = 700 * 1024
     private const val PAGE_BUDGET_BYTES = 512 * 1024
+    private const val MAX_ENTRIES = 2_048
+    private const val MAX_KEY_BYTES = 256
+    private const val MAX_VALUE_BYTES = 256 * 1024
 
     private val syncGroups = listOf(
         RESULT_WATCH_STATE_DATA,
@@ -125,7 +132,7 @@ object LibrarySyncManager {
         val entries = mutableListOf<LibraryEntry>()
 
         if (changedKeys != null) {
-            changedKeys.forEach { unprefixed ->
+            changedKeys.filter(::isAllowedLibraryKey).forEach { unprefixed ->
                 val prefixed = "$account/$unprefixed"
                 entries.add(
                     LibraryEntry(unprefixed, prefs.getString(prefixed, null), getSyncTs(context, unprefixed))
@@ -138,6 +145,7 @@ object LibrarySyncManager {
             val folder = "$account/$group"
             context.getKeys(folder).forEach { prefixed ->
                 val unprefixed = prefixed.removePrefix("$account/")
+                if (!isAllowedLibraryKey(unprefixed)) return@forEach
                 entries.add(
                     LibraryEntry(unprefixed, prefs.getString(prefixed, null), getSyncTs(context, unprefixed))
                 )
@@ -169,6 +177,7 @@ object LibrarySyncManager {
      */
     fun apply(context: Context, payload: LibrarySyncPayload): LibrarySyncPayload {
         if (!CompanionSettingsActivity.syncLibraryEnabled()) return dump(context)
+        if (!validatePayload(payload)) return dump(context)
         val prefs = context.getSharedPrefs()
         val account = DataStoreHelper.currentAccount
         var changed = 0
@@ -176,6 +185,9 @@ object LibrarySyncManager {
         DataStoreHelper.isApplyingRemote = true
         try {
             payload.entries.forEach { entry ->
+                // validatePayload checked this before the editor was created; keep the local
+                // guard next to the write so future callers cannot bypass the allowlist.
+                if (!isAllowedEntry(entry)) return@forEach
                 val prefixed = "$account/${entry.key}"
                 if (!shouldApplyRemoteEntry(
                         entry.updatedAtMs,
@@ -216,6 +228,19 @@ object LibrarySyncManager {
      */
     suspend fun fullSyncPhone(context: Context): Boolean {
         val tv = PairingManager.getActiveTv() ?: return false
+        return fullSyncPhone(context, tv)
+    }
+
+    /** Full exchange pinned to [tv], used by a connection epoch that must not retarget. */
+    suspend fun fullSyncPhone(context: Context, tv: PairedTv): Boolean {
+        return fullSyncPhone(context, tv) { true }
+    }
+
+    suspend fun fullSyncPhone(
+        context: Context,
+        tv: PairedTv,
+        stillCurrent: () -> Boolean,
+    ): Boolean {
         if (!CompanionSettingsActivity.syncLibraryEnabled()) return true
         val local = dump(context)
         val pages = if (payloadFits(local)) {
@@ -224,6 +249,7 @@ object LibrarySyncManager {
             chunkEntries(local.entries, PAGE_BUDGET_BYTES)
         }
         for (page in pages) {
+            if (!stillCurrent()) return false
             val reply = runCatching {
                 LanRemoteClient.send(tv, RemoteMessageType.SYNC_LIBRARY, page)
             }.getOrElse {
@@ -234,11 +260,13 @@ object LibrarySyncManager {
                 Log.w(TAG, "Full library sync rejected: ${reply.error}")
                 return false
             }
+            if (!stillCurrent()) return false
             val replyPayload = reply.payloadAs<LibrarySyncPayload>()
             if (replyPayload == null) {
                 Log.w(TAG, "Full library sync reply missing payload")
                 return false
             }
+            if (!stillCurrent()) return false
             apply(context, replyPayload)
         }
         return true
@@ -247,7 +275,7 @@ object LibrarySyncManager {
     /** TV: apply a SYNC_LIBRARY request and build the reply payload (used by the server). */
     fun handleSyncLibrary(context: Context, payload: LibrarySyncPayload): LibrarySyncPayload {
         // A TV with "Sync library" off neither applies remote data nor shares its own.
-        if (!CompanionSettingsActivity.syncLibraryEnabled()) {
+        if (!CompanionSettingsActivity.syncLibraryEnabled() || !validatePayload(payload)) {
             return LibrarySyncPayload(full = false)
         }
         apply(context, payload)
@@ -281,11 +309,61 @@ object LibrarySyncManager {
         return sha256Hex(canonical)
     }
 
-    /** Whether the serialized payload fits in one frame with headroom for the envelope. */
-    private fun payloadFits(payload: LibrarySyncPayload): Boolean {
-        val json = LanRemoteProtocol.json
-        return json.encodeToString(LibrarySyncPayload.serializer(), payload).length <= MAX_SAFE_PAYLOAD_BYTES
+    /** Validates the untrusted library data before it is used as a preference path/value. */
+    internal fun validatePayload(payload: LibrarySyncPayload, nowMs: Long = System.currentTimeMillis()): Boolean {
+        if (payload.entries.size > MAX_ENTRIES) return false
+        val encodedSize = runCatching {
+            LanRemoteProtocol.json.encodeToString(LibrarySyncPayload.serializer(), payload)
+                .toByteArray(Charsets.UTF_8).size
+        }.getOrNull() ?: return false
+        if (encodedSize > MAX_SAFE_PAYLOAD_BYTES) return false
+        return payload.entries.all { entry ->
+            isAllowedEntry(entry) &&
+                (entry.updatedAtMs == 0L || entry.updatedAtMs >= 0L &&
+                    entry.updatedAtMs <= nowMs + com.lagradost.cloudstream3.remote.RemoteAuth.MAX_CLOCK_SKEW_MS)
+        }
     }
+
+    internal fun isAllowedLibraryKey(key: String): Boolean {
+        val separator = key.indexOf('/')
+        if (separator <= 0 || separator == key.lastIndex) return false
+        val group = key.substring(0, separator)
+        val id = key.substring(separator + 1)
+        return group in syncGroups && id.matches(Regex("[0-9]+")) &&
+            key.toByteArray(Charsets.UTF_8).size <= MAX_KEY_BYTES
+    }
+
+    private fun isAllowedEntry(entry: LibraryEntry): Boolean {
+        if (!isAllowedLibraryKey(entry.key)) return false
+        val value = entry.valueJson ?: return true
+        if (value.toByteArray(Charsets.UTF_8).size > MAX_VALUE_BYTES) return false
+        val element = runCatching { LanRemoteProtocol.json.parseToJsonElement(value) }.getOrNull()
+            ?: return false
+        return validValueShape(entry.key.substringBefore('/'), element)
+    }
+
+    // Stored library values are either scalar enum/status values or JSON objects. Keep this
+    // deliberately structural: the app's generated serializers evolve, but preference paths
+    // must never escape these documented shapes.
+    private fun validValueShape(group: String, element: JsonElement): Boolean = when {
+        group == VIDEO_POS_DUR -> element is JsonObject &&
+            (element["position"] as? JsonPrimitive)?.content?.toLongOrNull() != null &&
+            (element["duration"] as? JsonPrimitive)?.content?.toLongOrNull() != null
+        group == RESULT_RESUME_WATCHING -> element is JsonObject &&
+            (element["parentId"] as? JsonPrimitive)?.content?.toIntOrNull() != null &&
+            (element["updateTime"] as? JsonPrimitive)?.content?.toLongOrNull() != null &&
+            (element["isFromDownload"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() != null
+        group == RESULT_WATCH_STATE_DATA || group == RESULT_FAVORITES_STATE_DATA ||
+            group == RESULT_SUBSCRIBED_STATE_DATA -> element is JsonObject &&
+            setOf("id", "name", "url", "apiName").all { it in element }
+        group == VIDEO_WATCH_STATE -> element is JsonPrimitive &&
+            element.isString && element.content == "Watched"
+        else -> element is JsonPrimitive && element.content.toIntOrNull() != null
+    }
+
+    /** Whether the serialized payload fits in one frame with headroom for the envelope. */
+    private fun payloadFits(payload: LibrarySyncPayload): Boolean =
+        validatePayload(payload)
 
     /** Splits a full dump into key-sorted pages, each within [budgetBytes] of serialized payload. */
     internal fun chunkEntries(entries: List<LibraryEntry>, budgetBytes: Int): List<LibrarySyncPayload> {

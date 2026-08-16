@@ -17,18 +17,20 @@ class LanRemoteDiscovery(
     private val pendingResolutions = ArrayDeque<NsdServiceInfo>()
     private var resolving = false
     private var started = false
+    private var generation = 0L
     private var multicastLock: WifiManager.MulticastLock? = null
 
     private val discoveryListener = object : NsdManager.DiscoveryListener {
         override fun onDiscoveryStarted(serviceType: String) = Unit
 
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-            if (serviceInfo.serviceType != LanRemoteProtocol.SERVICE_TYPE) return
+            if (!started || serviceInfo.serviceType != LanRemoteProtocol.SERVICE_TYPE) return
             pendingResolutions.add(serviceInfo)
             resolveNext()
         }
 
         override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+            if (!started) return
             devices.remove(serviceInfo.serviceName)
             publish()
         }
@@ -41,6 +43,7 @@ class LanRemoteDiscovery(
     fun start() {
         if (started) return
         started = true
+        ++generation
         multicastLock = wifiManager.createMulticastLock("cloudstream-lan-remote").apply {
             setReferenceCounted(false)
             acquire()
@@ -55,27 +58,34 @@ class LanRemoteDiscovery(
     fun stop() {
         if (!started) return
         started = false
+        generation += 1
         runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
         multicastLock?.let { lock ->
             if (lock.isHeld) lock.release()
         }
         multicastLock = null
         pendingResolutions.clear()
+        devices.clear()
         resolving = false
+        publish()
     }
 
     private fun resolveNext() {
+        if (!started) return
         if (resolving) return
         val service = pendingResolutions.pollFirst() ?: return
         resolving = true
         @Suppress("DEPRECATION")
+        val resolutionGeneration = generation
         nsdManager.resolveService(service, object : NsdManager.ResolveListener {
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                if (resolutionGeneration != generation || !started) return
                 resolving = false
                 resolveNext()
             }
 
             override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                if (resolutionGeneration != generation || !started) return
                 @Suppress("DEPRECATION")
                 val host = serviceInfo.host?.hostAddress
                 if (!host.isNullOrBlank()) {

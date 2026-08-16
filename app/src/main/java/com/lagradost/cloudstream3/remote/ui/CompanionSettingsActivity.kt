@@ -121,8 +121,14 @@ class CompanionSettingsActivity : AppCompatActivity() {
                 if (isTv) {
                     binding.companionStatus.text = getString(R.string.companion_tv_side_hint)
                 } else {
-                    CompanionSessionManager.syncExtensions()
-                    binding.companionStatus.setText(R.string.companion_synced)
+                    when (CompanionSessionManager.syncExtensions()) {
+                        CompanionSessionManager.ExtensionSyncStatus.SUCCESS ->
+                            binding.companionStatus.setText(R.string.companion_synced)
+                        CompanionSessionManager.ExtensionSyncStatus.SKIPPED ->
+                            binding.companionStatus.setText(R.string.companion_sync_skipped)
+                        CompanionSessionManager.ExtensionSyncStatus.FAILED ->
+                            binding.companionStatus.setText(R.string.companion_sync_failed)
+                    }
                 }
             }
         }
@@ -207,14 +213,9 @@ class CompanionSettingsActivity : AppCompatActivity() {
     private fun endpointFromInput(): Pair<String, Int>? {
         val input = binding.companionHost.text?.toString()?.trim()?.takeIf(String::isNotBlank)
             ?: return null
-        val host = input.substringBeforeLast(":", input).trim()
-        val port = if (host == input) {
-            com.lagradost.cloudstream3.remote.LanRemoteProtocol.PORT
-        } else {
-            input.substringAfterLast(":").toIntOrNull() ?: return null
-        }
-        if (host.isBlank() || port !in 1..65535) return null
-        return host to port
+        val endpoint = com.lagradost.cloudstream3.remote.parseLanRemoteAddress(input) ?: return null
+        if (endpoint.first.isBlank() || endpoint.second !in 1..65535) return null
+        return endpoint
     }
 
     // ------------------------------------------------------------------

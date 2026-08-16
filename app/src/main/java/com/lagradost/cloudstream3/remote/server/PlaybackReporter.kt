@@ -2,6 +2,8 @@ package com.lagradost.cloudstream3.remote.server
 
 import com.lagradost.cloudstream3.remote.NowPlayingPayload
 import com.lagradost.cloudstream3.remote.PlayPayload
+import com.lagradost.cloudstream3.remote.tracksPayloadFrom
+import com.lagradost.cloudstream3.ui.player.CurrentTracks
 import com.lagradost.cloudstream3.ui.player.IPlayer
 
 /**
@@ -11,7 +13,7 @@ import com.lagradost.cloudstream3.ui.player.IPlayer
 object PlaybackReporter {
     fun registerPlayer(player: IPlayer) = NowPlayingHub.registerPlayer(player)
 
-    fun unregisterPlayer() = NowPlayingHub.unregisterPlayer()
+    fun unregisterPlayer(player: IPlayer? = null) = NowPlayingHub.unregisterPlayer(player)
 
     /** Progress tick from the player; the hub throttles. */
     fun reportState(position: Long, duration: Long, state: NowPlayingPayload.State) =
@@ -19,6 +21,14 @@ object PlaybackReporter {
 
     fun playingState(player: IPlayer): NowPlayingPayload.State =
         NowPlayingHub.playingState(player)
+
+    /** F4a: push the active player's renderer tracks to opted-in phones. */
+    fun reportTracks(tracks: CurrentTracks) = NowPlayingHub.broadcastTracks(tracksPayloadFrom(tracks))
+
+    fun reportMetadata(title: String?, streamName: String?) =
+        NowPlayingHub.reportMetadata(title, streamName)
+
+    fun reportPlaybackChoices(payload: PlayPayload) = NowPlayingHub.reportPlaybackChoices(payload)
 
     /** Called by the server PLAY handler before the player is created. */
     fun stashPlay(payload: PlayPayload) = NowPlayingHub.stashPlay(payload)

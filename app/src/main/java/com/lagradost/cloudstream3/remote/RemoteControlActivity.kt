@@ -200,14 +200,9 @@ class RemoteControlActivity : AppCompatActivity() {
     private fun endpointFromInput(): LanRemoteEndpoint? {
         val input = binding.remoteHost.text?.toString()?.trim()?.takeIf(String::isNotBlank)
             ?: return null
-        val host = input.substringBeforeLast(":", input).trim()
-        val port = if (host == input) {
-            LanRemoteProtocol.PORT
-        } else {
-            input.substringAfterLast(":").toIntOrNull() ?: return null
-        }
-        if (host.isBlank() || port !in 1..65535) return null
-        return discoveredDevices.firstOrNull { it.host == host && it.port == port }
-            ?: LanRemoteEndpoint(host, host, port)
+        val endpoint = parseLanRemoteAddress(input) ?: return null
+        if (endpoint.first.isBlank() || endpoint.second !in 1..65535) return null
+        return discoveredDevices.firstOrNull { it.host == endpoint.first && it.port == endpoint.second }
+            ?: LanRemoteEndpoint(endpoint.first, endpoint.first, endpoint.second)
     }
 }

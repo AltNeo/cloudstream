@@ -45,6 +45,9 @@ import com.lagradost.cloudstream3.databinding.HomeSelectMainpageBinding
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.mvvm.observe
+import com.lagradost.cloudstream3.remote.InputContextPayload
+import com.lagradost.cloudstream3.remote.isInputTextWithinBound
+import com.lagradost.cloudstream3.remote.server.NowPlayingHub
 import com.lagradost.cloudstream3.ui.APIRepository
 import com.lagradost.cloudstream3.ui.BaseAdapter
 import com.lagradost.cloudstream3.ui.BaseFragment
@@ -125,6 +128,44 @@ class SearchFragment : BaseFragment<FragmentSearchBinding>(
             }
         }
 
+    // ------------------------------------------------------------------
+    // Reactive search-focus events for the companion (plan C3 / F1)
+    // ------------------------------------------------------------------
+
+    private fun broadcastSearchFocus(hasFocus: Boolean) {
+        if (hasFocus) {
+            val text = binding?.mainSearch?.query?.toString().orEmpty()
+            NowPlayingHub.broadcastInputContext(
+                InputContextPayload(
+                    context = InputContextPayload.Context.SEARCH_FIELD,
+                    label = "Search",
+                    // Whole-string bound: an oversized query is never echoed (all-or-nothing,
+                    // no truncation that could split a surrogate pair); the field is still
+                    // announced so the phone can show its keyboard.
+                    currentText = if (isInputTextWithinBound(text)) text else null,
+                )
+            )
+        } else {
+            NowPlayingHub.broadcastInputContext(
+                InputContextPayload(context = InputContextPayload.Context.IDLE)
+            )
+        }
+    }
+
+    /** Echoes the current query so the phone mirrors exactly what the TV shows. */
+    private fun broadcastSearchText(text: String) {
+        // Whole-string bound before the echo: never send a query that could push the frame
+        // over the 1 MiB cap, and never truncate/split it - an oversized echo is dropped.
+        if (!isInputTextWithinBound(text)) return
+        NowPlayingHub.broadcastInputContext(
+            InputContextPayload(
+                context = InputContextPayload.Context.SEARCH_FIELD,
+                label = "Search",
+                currentText = text,
+            )
+        )
+    }
+
     override fun pickLayout(): Int? =
         if (isLayout(TV or EMULATOR)) R.layout.fragment_search_tv else R.layout.fragment_search
 
@@ -141,6 +182,7 @@ class SearchFragment : BaseFragment<FragmentSearchBinding>(
     }
 
     override fun onDestroyView() {
+        broadcastSearchFocus(false)
         hideKeyboard()
         bottomSheetDialog?.ownHide()
         activity?.detachBackPressedCallback("SearchFragment")
@@ -416,12 +458,21 @@ class SearchFragment : BaseFragment<FragmentSearchBinding>(
             binding.searchFilter.isFocusableInTouchMode = true
         }
 
-        // Hide suggestions when search view loses focus (phone only)
-        if (isLayout(PHONE)) {
-            binding.mainSearch.setOnQueryTextFocusChangeListener { _, hasFocus ->
-                if (!hasFocus) {
-                    searchViewModel.clearSuggestions()
-                }
+        // Hide suggestions when search view loses focus (phone only) and tell the
+        // companion about focus so its keyboard follows the TV search field (plan C3).
+        binding.mainSearch.setOnQueryTextFocusChangeListener { _, hasFocus ->
+            if (!hasFocus && isLayout(PHONE)) {
+                searchViewModel.clearSuggestions()
+            }
+            broadcastSearchFocus(hasFocus)
+        }
+
+        // The TV layout requests initial focus in XML (<requestFocus/>), which can fire
+        // before this listener is installed; re-publish the current focus state after the
+        // view settles so an already-focused search field is never missed by the phone.
+        binding?.mainSearch?.post {
+            if (binding?.mainSearch?.hasFocus() == true) {
+                broadcastSearchFocus(true)
             }
         }
 
@@ -439,6 +490,10 @@ class SearchFragment : BaseFragment<FragmentSearchBinding>(
             }
 
             override fun onQueryTextChange(newText: String): Boolean {
+                // Current-text echo: keep the phone's input in sync with the TV field.
+                if (binding.mainSearch.hasFocus()) {
+                    broadcastSearchText(newText)
+                }
                 //searchViewModel.quickSearch(newText)
                 val showHistory = newText.isBlank()
                 if (showHistory) {

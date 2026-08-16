@@ -12,6 +12,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.TextView
+import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.actions.temp.CloudStreamPackage
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getActivity
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -78,8 +79,9 @@ object PlaybackLinkResolver {
                         setBackgroundColor(Color.argb(220, 0, 0, 0))
                         setTextColor(Color.WHITE)
                         gravity = Gravity.CENTER_VERTICAL
-                        setPadding(32, 0, 32, 0)
-                        text = "Preparing stream on phone… Complete any verification to continue."
+                        val padding = (32 * resources.displayMetrics.density).toInt()
+                        setPadding(padding, 0, padding, 0)
+                        text = context.getString(R.string.playback_resolver_preparing)
                     }
                     val container = FrameLayout(activity).apply {
                         addView(
@@ -93,7 +95,7 @@ object PlaybackLinkResolver {
                             status,
                             FrameLayout.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
-                                112,
+                                (112 * resources.displayMetrics.density).toInt(),
                                 Gravity.TOP,
                             ),
                         )
@@ -102,7 +104,7 @@ object PlaybackLinkResolver {
                         activity,
                         android.R.style.Theme_DeviceDefault_NoActionBar_Fullscreen,
                     ).apply {
-                        setTitle("Preparing stream")
+                        setTitle(R.string.playback_resolver_title)
                         setContentView(container)
                     }
 
@@ -130,7 +132,7 @@ object PlaybackLinkResolver {
                                     ?.takeIf { it.isNotBlank() }
                                     ?.let { requestHeaders["Cookie"] = it }
                                 activity.runOnUiThread {
-                                    status.text = "Stream found. Sending it to TV…"
+                                    status.text = context.getString(R.string.playback_resolver_found)
                                     finish(ResolvedRequest(requestUrl, requestHeaders))
                                 }
                             }

@@ -144,4 +144,54 @@ class LibrarySyncManagerTest {
             assertEquals(page.entries.map { it.key }, page.entries.map { it.key }.sorted())
         }
     }
+
+    @Test
+    fun `library payload rejects keys outside the documented groups`() {
+        val payload = LibrarySyncPayload(
+            full = false,
+            entries = listOf(entry("unrelated_setting/1")),
+        )
+        assertFalse(LibrarySyncManager.validatePayload(payload, nowMs = 1_000L))
+    }
+
+    @Test
+    fun `library payload accepts a bounded documented value`() {
+        assertTrue(
+            LibrarySyncManager.validatePayload(
+                LibrarySyncPayload(
+                    full = false,
+                    entries = listOf(LibraryEntry("video_pos_dur/1", "{\"position\":1,\"duration\":2}", 1_000L)),
+                ),
+                nowMs = 1_000L,
+            )
+        )
+    }
+
+    @Test
+    fun `library payload rejects malformed values and future timestamps`() {
+        assertFalse(
+            LibrarySyncManager.validatePayload(
+                LibrarySyncPayload(
+                    full = false,
+                    entries = listOf(LibraryEntry("video_pos_dur/1", "{\"position\":\"bad\"}", 1_000L)),
+                ),
+                nowMs = 1_000L,
+            )
+        )
+        assertFalse(
+            LibrarySyncManager.validatePayload(
+                LibrarySyncPayload(
+                    full = false,
+                    entries = listOf(
+                        LibraryEntry(
+                            "video_pos_dur/1",
+                            "{\"position\":1,\"duration\":2}",
+                            1_000L + 10 * 60 * 1000L,
+                        )
+                    ),
+                ),
+                nowMs = 1_000L,
+            )
+        )
+    }
 }

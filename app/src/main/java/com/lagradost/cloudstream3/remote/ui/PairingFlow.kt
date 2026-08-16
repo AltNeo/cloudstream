@@ -11,6 +11,8 @@ import com.lagradost.cloudstream3.remote.PairVerifyReply
 import com.lagradost.cloudstream3.remote.PairVerifyRequest
 import com.lagradost.cloudstream3.remote.PairingManager
 import com.lagradost.cloudstream3.remote.PairedTv
+import com.lagradost.cloudstream3.remote.RemoteAuth
+import com.lagradost.cloudstream3.remote.RemoteCrypto
 import com.lagradost.cloudstream3.remote.RemoteMessageType
 import com.lagradost.cloudstream3.remote.payloadAs
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -27,9 +29,12 @@ object PairingFlow {
         port: Int,
         onStatus: (String) -> Unit,
     ): PairedTv? {
+        val phoneKeyPair = RemoteCrypto.newPairingKeyPair()
+        val deviceId = PairingManager.myDeviceId(activity)
         val hello = PairHelloRequest(
-            deviceId = PairingManager.myDeviceId(activity),
+            deviceId = deviceId,
             deviceName = PairingManager.myDeviceName(),
+            publicKey = RemoteCrypto.publicKeyBase64(phoneKeyPair),
         )
         val helloReply = runCatching {
             LanRemoteClient.sendUnauthenticated(host, port, RemoteMessageType.PAIR_HELLO, hello)
@@ -50,10 +55,23 @@ object PairingFlow {
             return null
         }
 
+        val tvPublicKey = RemoteCrypto.decodePublicKey(helloPayload.publicKey)
+            ?: run { onStatus("Unexpected pairing key"); return null }
+        val sessionKey = RemoteCrypto.derivePairingKey(
+            privateKey = phoneKeyPair.private,
+            publicKey = tvPublicKey,
+            pin = pin,
+            sessionId = helloPayload.pairingSessionId,
+            phoneDeviceId = deviceId,
+        )
         val verifyReply = runCatching {
             LanRemoteClient.sendUnauthenticated(
                 host, port, RemoteMessageType.PAIR_VERIFY,
-                PairVerifyRequest(helloPayload.pairingSessionId, pin),
+                PairVerifyRequest(
+                    pairingSessionId = helloPayload.pairingSessionId,
+                    proof = RemoteCrypto.proof(sessionKey, helloPayload.pairingSessionId, deviceId),
+                ),
+                responseKey = sessionKey,
             )
         }.getOrNull()
             ?: run {
@@ -73,6 +91,7 @@ object PairingFlow {
             host = host,
             port = port,
             token = verifyPayload.token,
+            sessionKey = RemoteAuth.encodeBase64(sessionKey),
         )
         PairingManager.registerTv(tv, active = true)
         return tv
