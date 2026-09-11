@@ -49,6 +49,8 @@ import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.APIHolder.getApiFromNameNull
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.setKey
+import com.lagradost.cloudstream3.companion.ui.CompanionPlayerController
+import com.lagradost.cloudstream3.companion.ui.CompanionUiBridge
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
@@ -180,6 +182,7 @@ class GeneratorPlayer : FullScreenPlayer() {
 
     private var currentSelectedLink: Pair<ExtractorLink?, ExtractorUri?>? = null
     private var currentSelectedSubtitles: SubtitleData? = null
+    private var companionStartPositionMs: Long? = null
     private val currentMeta: Any? get() = viewModel.state.generatorState?.meta
     private val nextMeta: Any? get() = viewModel.state.generatorState?.nextMeta
 
@@ -235,6 +238,12 @@ class GeneratorPlayer : FullScreenPlayer() {
 
     override fun playerStatusChanged() {
         super.playerStatusChanged()
+        CompanionPlayerController.reportPlaybackState(
+            owner = this,
+            positionMs = player.getPosition() ?: 0L,
+            durationMs = player.getDuration() ?: 0L,
+            playing = player.getIsPlaying(),
+        )
         if (player.getIsPlaying()) {
             viewModel.forceClearCache = false
         }
@@ -526,13 +535,15 @@ class GeneratorPlayer : FullScreenPlayer() {
         context?.let { ctx ->
             val (url, uri) = link
             val subtitles = viewModel.state.subtitles
+            val companionStart = companionStartPositionMs
+            companionStartPositionMs = null
             player.loadPlayer(
                 ctx,
                 sameEpisode,
                 url,
                 uri,
                 startPosition = if (sameEpisode) null else {
-                    if (isNextEpisode) 0L else getPos()
+                    companionStart ?: if (isNextEpisode) 0L else getPos()
                 },
                 subtitles,
                 (if (sameEpisode) currentSelectedSubtitles else null) ?: getAutoSelectSubtitle(
@@ -1716,12 +1727,29 @@ class GeneratorPlayer : FullScreenPlayer() {
     override fun onDestroy() {
         ResultFragment.updateUI()
         currentVerifyLink?.cancel()
+        CompanionPlayerController.unregister(this)
         super.onDestroy()
     }
 
     var maxEpisodeSet: Int? = null
     var hasRequestedStamps: Boolean = false
     override fun playerPositionChanged(position: Long, duration: Long) {
+        if (CompanionPlayerController.isRegistered(this)) {
+            CompanionPlayerController.reportPlaybackState(
+                this,
+                position,
+                duration,
+                player.getIsPlaying(),
+            )
+            CompanionUiBridge.publishPlayback(
+                CompanionUiBridge.Playback(
+                    title = getPlayerVideoTitle().ifBlank { getHeaderName().orEmpty() },
+                    positionMs = position,
+                    durationMs = duration,
+                    playing = player.getIsPlaying(),
+                )
+            )
+        }
         // Don't save livestream data
         if ((currentMeta as? ResultEpisode)?.tvType?.isLiveStream() == true) return
 
@@ -1922,6 +1950,10 @@ class GeneratorPlayer : FullScreenPlayer() {
 
     fun setTitle() {
         var playerVideoTitle = getPlayerVideoTitle()
+
+        CompanionUiBridge.playback.value?.remotePhoneName?.let { phone ->
+            playerVideoTitle = "$playerVideoTitle ${context?.getString(R.string.via_phone, phone)}"
+        }
 
         //Hide title, if set in setting
         if (limitTitle < 0) {
@@ -2211,6 +2243,7 @@ class GeneratorPlayer : FullScreenPlayer() {
 
     @MainThread
     fun releasePlayer() {
+        CompanionPlayerController.unregister(this)
         player.release()
         currentSelectedSubtitles = null
         currentSelectedLink = null
@@ -2222,6 +2255,7 @@ class GeneratorPlayer : FullScreenPlayer() {
     }
 
     fun exitPlayer() {
+        CompanionPlayerController.unregister(this)
         playerHostView?.exitFullscreen()
         player.release()
         activity?.popCurrentPage()
@@ -2238,6 +2272,8 @@ class GeneratorPlayer : FullScreenPlayer() {
 
         val uuid = savedInstanceState?.getString("uuid") ?: arguments?.getString("uuid")
         val index = savedInstanceState?.getInt("index") ?: arguments?.getInt("index")
+        companionStartPositionMs = arguments?.getLong("companionStartPositionMs", -1L)
+            ?.takeIf { it >= 0L }
         val generator = generators[uuid]
 
         unwrapBundle(savedInstanceState)
@@ -2251,6 +2287,7 @@ class GeneratorPlayer : FullScreenPlayer() {
             return
         }
         viewModel.attachGenerator(generator, index)
+        CompanionPlayerController.register(this)
 
         context?.let { ctx ->
             val settingsManager = PreferenceManager.getDefaultSharedPreferences(ctx)

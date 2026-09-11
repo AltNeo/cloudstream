@@ -32,4 +32,12 @@
     <dimen name="continue_watching_progress_size">25dp</dimen>
     <dimen name="circular_progress_thickness">2dp</dimen>
     <dimen name="download_header_progress_size">35dp</dimen>
+    <dimen name="companion_screen_padding">24dp</dimen>
+    <dimen name="companion_pairing_pin_size">40sp</dimen>
+    <dimen name="companion_pairing_pin_label_size">16sp</dimen>
+    <dimen name="companion_toolbar_icon_size">24dp</dimen>
+    <dimen name="companion_sheet_peek_height">96dp</dimen>
+    <dimen name="companion_picker_title_size">20sp</dimen>
+    <dimen name="companion_now_playing_title_size">18sp</dimen>
+    <dimen name="companion_section_title_size">18sp</dimen>
 </resources>

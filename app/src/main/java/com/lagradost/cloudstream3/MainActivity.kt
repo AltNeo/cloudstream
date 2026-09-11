@@ -77,6 +77,9 @@ import com.lagradost.cloudstream3.CommonActivity.showToast
 import com.lagradost.cloudstream3.CommonActivity.updateLocale
 import com.lagradost.cloudstream3.CommonActivity.updateTheme
 import com.lagradost.cloudstream3.actions.temp.fcast.FcastManager
+import com.lagradost.cloudstream3.companion.ui.CompanionToolbar
+import com.lagradost.cloudstream3.companion.ui.CompanionKeyboardController
+import com.lagradost.cloudstream3.companion.ui.CompanionShareIntent
 import com.lagradost.cloudstream3.databinding.ActivityMainBinding
 import com.lagradost.cloudstream3.databinding.ActivityMainTvBinding
 import com.lagradost.cloudstream3.databinding.BottomResultviewPreviewBinding
@@ -113,6 +116,7 @@ import com.lagradost.cloudstream3.ui.player.LinkGenerator
 import com.lagradost.cloudstream3.ui.result.LinearListLayout
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.result.START_ACTION_RESUME_LATEST
+import com.lagradost.cloudstream3.ui.result.START_ACTION_PLAY_ON_TV
 import com.lagradost.cloudstream3.ui.result.SyncViewModel
 import com.lagradost.cloudstream3.ui.search.SearchFragment
 import com.lagradost.cloudstream3.ui.search.SearchResultBuilder
@@ -736,8 +740,19 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
 
     private fun handleAppIntent(intent: Intent?) {
         if (intent == null) return
-        val str = intent.dataString
         loadCache()
+
+        CompanionShareIntent.extractUrl(intent)?.let { sharedUrl ->
+            val api = APIHolder.getApiFromUrlNull(sharedUrl)
+            if (api != null) {
+                loadResult(sharedUrl, api.name, "", START_ACTION_PLAY_ON_TV)
+                return
+            }
+            handleAppIntentUrl(this, sharedUrl, false, intent.extras)
+            return
+        }
+
+        val str = intent.dataString
 
         handleAppIntentUrl(this, str, false, intent.extras)
     }
@@ -1284,6 +1299,8 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
         }
 
         binding?.apply {
+            CompanionToolbar.install(homeRoot, this@MainActivity)
+            CompanionKeyboardController.install(homeRoot, this@MainActivity)
             fixSystemBarsPadding(
                 navView,
                 heightResId = R.dimen.nav_view_height,

@@ -264,7 +264,7 @@ dependencies {
     implementation(libs.overlappingpanels) // Gestures
     implementation(libs.biometric) // Fingerprint Authentication
     implementation(libs.previewseekbar.media3) // SeekBar Preview
-    implementation(libs.qrcode.kotlin) // QR Code for PIN Auth on TV
+    implementation(libs.qrcode.kotlin) // QR Code for account device auth
 
     // Extensions & Other Libs
     implementation(libs.jsoup) // HTML Parser

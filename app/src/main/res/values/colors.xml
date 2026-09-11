@@ -23,6 +23,8 @@
     <color name="black">#000</color>
     <color name="gray_200">#EEEEEE</color>
     <color name="gray_400">#BDBDBD</color>
+    <color name="companion_keyboard_text">#FFFFFFFF</color>
+    <color name="companion_keyboard_hint">#FFCCCCCC</color>
 
     <color name="whiteText">#FFF</color>
     <color name="blackText">#000</color>

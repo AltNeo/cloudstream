@@ -20,6 +20,7 @@ import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.AnimeLoadResponse
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.context
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.setKey
+import com.lagradost.cloudstream3.companion.ui.CompanionUiBridge
 import com.lagradost.cloudstream3.CommonActivity.activity
 import com.lagradost.cloudstream3.CommonActivity.getCastSession
 import com.lagradost.cloudstream3.CommonActivity.showToast
@@ -1359,6 +1360,10 @@ class ResultViewModel2 : ViewModel() {
             ACTION_SHOW_OPTIONS -> {
                 val options = mutableListOf<Pair<UiText, Int>>()
 
+                if (CompanionUiBridge.devices.value.any { it.connected }) {
+                    options.add(txt(R.string.play_on_tv) to ACTION_PLAY_EPISODE_ON_TV)
+                }
+
                 if (activity?.isConnectedToChromecast() == true) {
                     options.addAll(
                         listOf(
@@ -1416,7 +1421,9 @@ class ResultViewModel2 : ViewModel() {
 
             ACTION_CLICK_DEFAULT -> {
                 activity?.let { ctx ->
-                    if (ctx.isConnectedToChromecast()) {
+                    if (CompanionUiBridge.devices.value.any { it.connected }) {
+                        handleEpisodeClickEvent(click.copy(action = ACTION_PLAY_EPISODE_ON_TV))
+                    } else if (ctx.isConnectedToChromecast()) {
                         handleEpisodeClickEvent(
                             click.copy(action = ACTION_CHROME_CAST_EPISODE)
                         )
@@ -1541,6 +1548,43 @@ class ResultViewModel2 : ViewModel() {
 
             ACTION_CHROME_CAST_EPISODE -> {
                 startChromecast(activity, click.data)
+            }
+
+            ACTION_PLAY_EPISODE_ON_TV -> {
+                val response = currentResponse ?: return
+                loadLinks(click.data, isVisible = true, sourceTypes = LOADTYPE_INAPP) { result ->
+                    val title = activity?.getNameFull(
+                        click.data.name,
+                        click.data.episode,
+                        click.data.season,
+                    ) ?: response.name
+                    val accepted = CompanionUiBridge.playOnTv(
+                        title = title,
+                        episodeLabel = click.data.season?.let { season ->
+                            "S${season}E${click.data.episode}"
+                        },
+                        posterUrl = click.data.poster ?: response.posterUrl,
+                        mediaId = click.data.id,
+                        links = result.links,
+                        subtitles = result.subs,
+                    )
+                    if (!accepted) {
+                        activity?.let { host ->
+                            AlertDialog.Builder(host)
+                                .setTitle(R.string.play_on_tv)
+                                .setMessage(R.string.connect_to_tv_disconnected)
+                                .setNegativeButton(android.R.string.cancel, null)
+                                .setPositiveButton(R.string.play_on_phone) { _, _ ->
+                                    viewModelScope.launchSafe {
+                                        handleEpisodeClickEvent(
+                                            click.copy(action = ACTION_PLAY_EPISODE_IN_PLAYER)
+                                        )
+                                    }
+                                }
+                                .show()
+                        }
+                    }
+                }
             }
 
             ACTION_PLAY_EPISODE_IN_PLAYER -> {
@@ -2540,6 +2584,17 @@ class ResultViewModel2 : ViewModel() {
                         EpisodeClickEvent(
                             getPlayerAction(activity),
                             episode
+                        )
+                    )
+                }
+
+                START_ACTION_PLAY_ON_TV -> {
+                    val episode = getMovie() ?: currentEpisodes.values.flatten().firstOrNull()
+                        ?: return@launchSafe
+                    handleAction(
+                        EpisodeClickEvent(
+                            ACTION_PLAY_EPISODE_ON_TV,
+                            episode,
                         )
                     )
                 }

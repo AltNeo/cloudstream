@@ -14,6 +14,9 @@ import coil3.PlatformContext
 import coil3.SingletonImageLoader
 import com.lagradost.api.setContext
 import com.lagradost.cloudstream3.BuildConfig
+import com.lagradost.cloudstream3.companion.runtime.CompanionRuntime
+import com.lagradost.cloudstream3.companion.runtime.AndroidCompanionGeneratorFactory
+import com.lagradost.cloudstream3.companion.runtime.CompanionTvRuntimeAdapters
 import com.lagradost.cloudstream3.mvvm.safe
 import com.lagradost.cloudstream3.mvvm.safeAsync
 import com.lagradost.cloudstream3.plugins.PluginManager
@@ -84,6 +87,12 @@ class CloudStreamApp : Application(), SingletonImageLoader.Factory {
         }
 
         AppDebug.isDebug = BuildConfig.DEBUG
+        CompanionRuntime.install(
+            this,
+            tvAdapters = CompanionTvRuntimeAdapters(
+                playbackFactory = AndroidCompanionGeneratorFactory(),
+            ),
+        )
     }
 
     override fun attachBaseContext(base: Context?) {
