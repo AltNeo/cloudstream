@@ -52,8 +52,9 @@ class LinkResolutionPipelineTest {
         val request = (outcome as LinkResolutionOutcome.Success).request
         assertEquals(1, request.links.size)
         assertEquals(1_700_000_100_000, request.links.single().expiresAtMs)
-        // The source referer is cross-origin from the CDN URL, so it must not be handed off.
-        assertNull(request.links.single().referer)
+        // The source referer is cross-origin from the CDN URL, but referer-gated streams
+        // require it, so it is preserved as an explicit field.
+        assertEquals("https://site.example/", request.links.single().referer)
         assertEquals("WebView UA", probe.requests.single().headers["User-Agent"])
         assertEquals("provider=cookie; session=web", probe.requests.single().headers["Cookie"])
         assertFalse(probe.requests.single().headers.keys.any { it.equals("Not-Allowlisted", true) })
@@ -119,7 +120,7 @@ class LinkResolutionPipelineTest {
     }
 
     @Test
-    fun `cross-origin redirect strips sensitive headers and referer`() = runBlocking {
+    fun `cross-origin redirect strips sensitive headers but preserves referer`() = runBlocking {
         val probe = RecordingProbe {
             ProbeResponse(206, "https://other.example/video.mp4", "video/mp4", byteArrayOf(1))
         }
@@ -144,11 +145,11 @@ class LinkResolutionPipelineTest {
         val resolved = result.request.links.single()
         assertEquals("https://other.example/video.mp4", resolved.url)
         assertEquals(mapOf("Accept" to "video/*"), resolved.headers)
-        assertNull(resolved.referer)
+        assertEquals("https://origin.example/page", resolved.referer)
     }
 
     @Test
-    fun `invalid nested audio URL discards candidate and invalid subtitle is omitted`() = runBlocking {
+    fun `invalid nested audio URL is dropped and invalid subtitle is omitted`() = runBlocking {
         val probe = RecordingProbe {
             ProbeResponse(206, it, "video/mp4", byteArrayOf(1))
         }
@@ -165,8 +166,8 @@ class LinkResolutionPipelineTest {
         val invalidSubtitle = newSubtitleFile("English", "https://user:pass@cdn.example/sub.vtt")
         val invalidAudioResult = LinkResolutionPipeline(probe, FixedClock(1_000L)).resolve(
             LinkResolutionInput(listOf(link), emptyList(), "Title", lineageId = "lineage")
-        )
-        assertTrue(invalidAudioResult is LinkResolutionOutcome.NoCandidates)
+        ) as LinkResolutionOutcome.Success
+        assertTrue(invalidAudioResult.request.links.single().audioTracks.isEmpty())
 
         val validAudioLink = ExtractorLink(
             source = "source",

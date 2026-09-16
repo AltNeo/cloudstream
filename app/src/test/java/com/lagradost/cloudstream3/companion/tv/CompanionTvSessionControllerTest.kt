@@ -62,6 +62,125 @@ class CompanionTvSessionControllerTest {
     }
 
     @Test
+    fun `remote transport controls dispatch and next stays navigation`() = runBlocking {
+        val controls = RecordingControls(hasPlayer = true)
+        val sink = RecordingSink()
+        val controller = CompanionTvSessionController(
+            launcher = RecordingLauncher(),
+            sink = sink,
+            playbackControls = controls,
+        )
+        controller.onPhoneConnected("phone")
+        controller.handlePlay("phone", "play", request("lineage", 0))
+
+        listOf(
+            PlayerAction.PLAY to null,
+            PlayerAction.PAUSE to null,
+            PlayerAction.TOGGLE to null,
+            PlayerAction.SEEK_TO to 100L,
+            PlayerAction.SEEK_REL to 10L,
+            PlayerAction.STOP to null,
+        ).forEachIndexed { index, (action, position) ->
+            assertEquals(
+                ResultPayload(ok = true),
+                controller.handlePlayerCommand(
+                    "phone",
+                    "command-$index",
+                    PlayerCommand(action, positionMs = position),
+                ),
+            )
+        }
+        assertEquals(
+            listOf("PLAY", "PAUSE", "TOGGLE", "SEEK_TO", "SEEK_REL", "STOP"),
+            controls.actions,
+        )
+        assertEquals(1, sink.events.count { it.kind == EventKind.PLAYBACK_STATE })
+
+        val navigationController = CompanionTvSessionController(
+            launcher = RecordingLauncher(),
+            sink = sink,
+            playbackControls = controls,
+        )
+        navigationController.onPhoneConnected("phone")
+        navigationController.handlePlay("phone", "play-2", request("lineage-2", 0))
+        assertEquals(
+            ResultPayload(ok = true),
+            navigationController.handlePlayerCommand(
+                "phone", "next", PlayerCommand(PlayerAction.NEXT),
+            ),
+        )
+        assertTrue(sink.events.any { it.kind == EventKind.NAV_REQUESTED })
+    }
+
+    @Test
+    fun `missing player rejects transport controls without dispatch`() = runBlocking {
+        val controls = RecordingControls(hasPlayer = false)
+        val controller = CompanionTvSessionController(
+            launcher = RecordingLauncher(),
+            sink = RecordingSink(),
+            playbackControls = controls,
+        )
+        controller.handlePlay("phone", "play", request("lineage", 0))
+        assertEquals(
+            ErrorCode.NO_ACTIVE_PLAYER,
+            controller.handlePlayerCommand(
+                "phone", "pause", PlayerCommand(PlayerAction.PAUSE),
+            ).error,
+        )
+        assertTrue(controls.actions.isEmpty())
+    }
+
+    @Test
+    fun `async failure advances to next candidate before notifying phone`() = runBlocking {
+        val launcher = SequenceLauncher(
+            listOf(PlaybackStartResult.Started, PlaybackStartResult.Started),
+        )
+        val sink = RecordingSink()
+        val controller = CompanionTvSessionController(launcher = launcher, sink = sink)
+        val play = request("lineage", 0).copy(links = listOf(
+            link("https://one.example/video.mp4"),
+            link("https://two.example/video.mp4"),
+        ))
+        assertEquals(PlayAcceptance.Started, controller.handlePlay("phone", "play", play))
+        controller.onRuntimePlaybackFailure(PlaybackStartFailure(StartupFailureStage.SEGMENT))
+        assertEquals(2, launcher.starts.size)
+        assertTrue(sink.events.none { it.kind == EventKind.LINK_FAILED })
+    }
+
+    @Test
+    fun `async failure emits one link failed after all remaining candidates fail`() = runBlocking {
+        val failure = PlaybackStartResult.Failed(PlaybackStartFailure(StartupFailureStage.SEGMENT))
+        val launcher = SequenceLauncher(listOf(PlaybackStartResult.Started, failure, failure))
+        val sink = RecordingSink()
+        val controller = CompanionTvSessionController(launcher = launcher, sink = sink)
+        val play = request("lineage", 0).copy(links = listOf(
+            link("https://one.example/video.mp4"),
+            link("https://two.example/video.mp4"),
+            link("https://three.example/video.mp4"),
+        ))
+        controller.handlePlay("phone", "play", play)
+        controller.onRuntimePlaybackFailure(PlaybackStartFailure(StartupFailureStage.SEGMENT))
+        assertEquals(1, sink.events.count { it.kind == EventKind.LINK_FAILED })
+        assertEquals(2, sink.events.single { it.kind == EventKind.LINK_FAILED }.linkFailed?.linkIndex)
+    }
+
+    @Test
+    fun `new lineage replaces owner and routes result and events to that device`() = runBlocking {
+        val launcher = RecordingLauncher()
+        val sink = RecordingSink()
+        val controller = CompanionTvSessionController(launcher = launcher, sink = sink)
+        controller.handlePlay("phone-a", "a", request("lineage-a", 0))
+        controller.handlePlay("phone-b", "b", request("lineage-b", 0))
+        controller.onRuntimePlaybackFailure(PlaybackStartFailure(StartupFailureStage.SEGMENT))
+
+        assertEquals("phone-a", sink.resultDevices["a"])
+        assertEquals("phone-b", sink.resultDevices["b"])
+        assertEquals("phone-b", sink.eventDevices.last())
+        assertEquals("lineage-b", controller.snapshot()?.lineageId)
+        assertEquals("lineage-b", sink.events.last().linkFailed?.lineageId)
+    }
+
+    @Test
     fun `failed candidate emits link failed and keeps session for recovery`() = runBlocking {
         val launcher = RecordingLauncher(
             result = PlaybackStartResult.Failed(
@@ -232,6 +351,30 @@ class CompanionTvSessionControllerTest {
     )
 }
 
+private class RecordingControls(private val hasPlayer: Boolean) : TvPlaybackControls {
+    val actions = mutableListOf<String>()
+    override fun hasPlayer(): Boolean = hasPlayer
+    override fun dispatch(action: String, positionMs: Long?): Boolean {
+        actions += action
+        return true
+    }
+}
+
+private class SequenceLauncher(private val results: List<PlaybackStartResult>) : TvPlaybackLauncher {
+    val starts = mutableListOf<ResolvedLink>()
+    private var index = 0
+    override suspend fun startCandidate(
+        request: PlayRequest,
+        candidate: ResolvedLink,
+        startPositionMs: Long?,
+        deadlineMs: Long,
+    ): PlaybackStartResult {
+        starts += candidate
+        return results.getOrElse(index++) { results.last() }
+    }
+    override fun stop() = Unit
+}
+
 private class RecordingLauncher(
     private val result: PlaybackStartResult = PlaybackStartResult.Started,
 ) : TvPlaybackLauncher {
@@ -255,15 +398,19 @@ private class RecordingLauncher(
 
 private class RecordingSink : CompanionTvSessionSink {
     val results = mutableMapOf<String, ResultPayload>()
+    val resultDevices = mutableMapOf<String, String>()
     val events = mutableListOf<Event>()
+    val eventDevices = mutableListOf<String>()
     val statuses = mutableListOf<TvStatusMessage>()
 
-    override fun sendResult(requestId: String, result: ResultPayload) {
+    override fun sendResult(deviceId: String, requestId: String, result: ResultPayload) {
         results[requestId] = result
+        resultDevices[requestId] = deviceId
     }
 
-    override fun sendEvent(event: Event) {
+    override fun sendEvent(deviceId: String, event: Event) {
         events += event
+        eventDevices += deviceId
     }
 
     override fun showStatus(message: TvStatusMessage) {

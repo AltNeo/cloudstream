@@ -17,7 +17,7 @@ class FrameCodecTest {
     @Test
     fun `oversized payload cannot be written`() {
         val payload = ByteArray(FrameCodec.MAX_FRAME_SIZE + 1)
-        assertThrows(IllegalArgumentException::class.java) {
+        assertThrows(FrameException::class.java) {
             FrameCodec.writeFrame(ByteArrayOutputStream(), payload)
         }
     }
