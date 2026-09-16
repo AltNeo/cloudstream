@@ -32,8 +32,8 @@ object FrameCodec {
     }
 
     fun writeFrame(output: OutputStream, payload: ByteArray) {
-        require(payload.size <= MAX_FRAME_SIZE) {
-            "frame payload exceeds $MAX_FRAME_SIZE bytes"
+        if (payload.size > MAX_FRAME_SIZE) {
+            throw FrameException("frame payload exceeds $MAX_FRAME_SIZE bytes")
         }
         val data = DataOutputStream(output)
         data.writeInt(payload.size)

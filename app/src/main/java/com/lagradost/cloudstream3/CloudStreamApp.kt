@@ -1,6 +1,7 @@
 package com.lagradost.cloudstream3
 
 import android.app.Activity
+import android.app.Application.ActivityLifecycleCallbacks
 import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
@@ -93,6 +94,33 @@ class CloudStreamApp : Application(), SingletonImageLoader.Factory {
                 playbackFactory = AndroidCompanionGeneratorFactory(),
             ),
         )
+        registerActivityLifecycleCallbacks(ForegroundTracker)
+    }
+
+    private object ForegroundTracker : ActivityLifecycleCallbacks {
+        private var startedActivities = 0
+
+        @Synchronized
+        override fun onActivityStarted(activity: Activity) {
+            if (startedActivities == 0) {
+                CompanionRuntime.current()?.onAppForegrounded()
+            }
+            startedActivities += 1
+        }
+
+        @Synchronized
+        override fun onActivityStopped(activity: Activity) {
+            startedActivities = (startedActivities - 1).coerceAtLeast(0)
+            if (startedActivities == 0) {
+                CompanionRuntime.current()?.onAppBackgrounded()
+            }
+        }
+
+        override fun onActivityCreated(activity: Activity, savedInstanceState: android.os.Bundle?) = Unit
+        override fun onActivityResumed(activity: Activity) = Unit
+        override fun onActivityPaused(activity: Activity) = Unit
+        override fun onActivitySaveInstanceState(activity: Activity, outState: android.os.Bundle) = Unit
+        override fun onActivityDestroyed(activity: Activity) = Unit
     }
 
     override fun attachBaseContext(base: Context?) {

@@ -60,6 +60,7 @@
     <string name="connect_to_tv_pin">Pairing PIN</string>
     <string name="play_on_tv">Play on TV</string>
     <string name="play_on_phone">Play on phone</string>
+    <string name="companion_drm_only">This source is DRM-protected and cannot be sent to the TV. Play it on your phone instead.</string>
     <string name="via_phone">via %s</string>
     <string name="remote_now_playing">Now playing</string>
     <string name="remote_play">Play</string>

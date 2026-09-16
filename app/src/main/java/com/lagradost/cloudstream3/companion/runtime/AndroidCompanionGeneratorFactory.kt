@@ -47,6 +47,8 @@ private class AndroidCompanionGeneratorPlayer(
         val generator = CompanionLinkGenerator(link, subtitles, metadata)
         val args = GeneratorPlayer.newInstance(generator, 0).apply {
             if (startPositionMs != null) putLong("companionStartPositionMs", startPositionMs)
+            metadata.lineageId?.let { putString("companionLineageId", it) }
+            metadata.launchToken?.let { putString("companionLaunchToken", it) }
         }
         started = true
         activity.runOnUiThread {

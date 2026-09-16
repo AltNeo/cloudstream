@@ -100,8 +100,9 @@ object CompanionUiBridge {
             subtitles: List<SubtitleData>,
         ): Boolean = false
 
-        override fun sendPlayerCommand(action: String, positionMs: Long?) =
+        override fun sendPlayerCommand(action: String, positionMs: Long?) {
             CompanionPlayerController.dispatch(action, positionMs)
+        }
         override fun sendKey(keyCode: Int) = Unit
         override fun sendInputText(text: String) = Unit
     }

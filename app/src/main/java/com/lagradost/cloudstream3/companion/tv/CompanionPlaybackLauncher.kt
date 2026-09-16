@@ -15,6 +15,9 @@ data class CompanionPlaybackMetadata(
     val posterUrl: String?,
     val mediaId: Int?,
     val durationMs: Long?,
+    val lineageId: String? = null,
+    /** One-time token binding the launched player to this candidate start. */
+    val launchToken: String? = null,
 )
 
 interface CompanionGeneratorPlayer {
@@ -109,6 +112,7 @@ class CompanionPlaybackLauncher(
         releaseActive(invalidateGeneration = false)
         activeLineageId = request.lineageId
         activeGeneration = playerGeneration
+        val launchToken = java.util.UUID.randomUUID().toString()
 
         val player = try {
             factory.create(
@@ -120,6 +124,8 @@ class CompanionPlaybackLauncher(
                     posterUrl = request.posterUrl,
                     mediaId = request.mediaId,
                     durationMs = request.durationMs,
+                    lineageId = request.lineageId,
+                    launchToken = launchToken,
                 ),
             )
         } catch (_: Throwable) {
@@ -165,6 +171,8 @@ class CompanionPlaybackLauncher(
                     posterUrl = request.posterUrl,
                     mediaId = request.mediaId,
                     durationMs = request.durationMs,
+                    lineageId = request.lineageId,
+                    launchToken = launchToken,
                 ),
             )
             PlaybackStartResult.Started

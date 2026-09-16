@@ -59,8 +59,10 @@ import com.lagradost.cloudstream3.companion.transport.CompanionNsdManager
 import com.lagradost.cloudstream3.companion.transport.CompanionServiceRecord
 import com.lagradost.cloudstream3.companion.transport.CompanionTcpClient
 import com.lagradost.cloudstream3.companion.transport.CompanionTcpServer
+import com.lagradost.cloudstream3.companion.ui.CompanionLaunchIdentity
 import com.lagradost.cloudstream3.companion.ui.CompanionPlayerController
 import com.lagradost.cloudstream3.companion.ui.CompanionUiBridge
+import com.lagradost.cloudstream3.companion.tv.CompanionTvSessionSink
 import com.lagradost.cloudstream3.companion.ui.CompanionUiBridge.Device
 import com.lagradost.cloudstream3.companion.ui.CompanionUiBridge.InputContext as UiInputContext
 import com.lagradost.cloudstream3.ui.player.SubtitleData
@@ -82,6 +84,27 @@ import kotlinx.coroutines.sync.withLock
 import java.io.Closeable
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+
+private class TvSinkRegistry : CompanionTvSessionSink {
+    private data class Entry(val sink: CompanionTvSessionSink)
+    private val sinks = ConcurrentHashMap<String, Entry>()
+
+    fun register(deviceId: String, sink: CompanionTvSessionSink): AutoCloseable {
+        val entry = Entry(sink)
+        sinks[deviceId] = entry
+        return AutoCloseable { sinks.remove(deviceId, entry) }
+    }
+
+    override fun sendResult(deviceId: String, requestId: String, result: com.lagradost.cloudstream3.companion.protocol.ResultPayload) {
+        sinks[deviceId]?.sink?.sendResult(deviceId, requestId, result)
+    }
+
+    override fun sendEvent(deviceId: String, event: Event) {
+        sinks[deviceId]?.sink?.sendEvent(deviceId, event)
+    }
+
+    override fun showStatus(message: com.lagradost.cloudstream3.companion.tv.TvStatusMessage) = Unit
+}
 
 enum class CompanionRuntimeRole {
     PHONE,
@@ -125,6 +148,9 @@ class CompanionRuntimeController(
     private val tvSessions = ConcurrentHashMap<String, TvSessionRecord>()
     private var tvServer: CompanionTcpServer? = null
     private var tvAuthenticator: TvCompanionAuthenticator? = null
+    private var tvController: com.lagradost.cloudstream3.companion.tv.CompanionTvSessionController? = null
+    private var tvLauncher: CompanionPlaybackLauncher? = null
+    private val tvSinks = TvSinkRegistry()
     private var phoneSession: PhoneCompanionSession? = null
     private var phoneEndpoint: CompanionEndpoint? = null
     private var phonePeerAlias: String? = null
@@ -226,6 +252,9 @@ class CompanionRuntimeController(
     override fun revoke(deviceId: String) {
         scope.launch {
             if (role == CompanionRuntimeRole.TV) {
+                // Tear down controller state and the live event channel before deleting the key.
+                tvController?.onPhoneUnpaired(deviceId)
+                tvSessions.remove(deviceId)?.close()
                 tvAuthenticator?.revoke(deviceId)
                 revocations.revoke(deviceId)
                 publishDevices()
@@ -326,7 +355,25 @@ class CompanionRuntimeController(
 
     private suspend fun startTv() = lifecycleMutex.withLock {
         if (role != CompanionRuntimeRole.TV || tvServer?.isRunning == true) return@withLock
+        val sharedController = tvController ?: run {
+            val launcher = tvAdapters.playbackFactory?.let {
+                CompanionPlaybackLauncher(it, nowPlaying)
+            } ?: UnavailableTvPlaybackLauncher
+            tvLauncher = launcher as? CompanionPlaybackLauncher
+            com.lagradost.cloudstream3.companion.tv.CompanionTvSessionController(
+                launcher = launcher,
+                sink = tvSinks,
+                playbackControls = object : com.lagradost.cloudstream3.companion.tv.TvPlaybackControls {
+                    override fun hasPlayer(): Boolean = CompanionPlayerController.hasActivePlayer()
+                    override fun dispatch(action: String, positionMs: Long?): Boolean =
+                        CompanionPlayerController.dispatch(action, positionMs)
+                },
+            ).also { tvController = it }
+        }
         CompanionPlayerController.installReporter(PlayerReporter())
+        CompanionPlayerController.installTvNavigator { direction ->
+            tvController?.requestTvNavigation(direction) == true
+        }
         val authenticator = TvCompanionAuthenticator(keyStore, {
             CompanionPreferences.deviceName(appContext)
         }, pairingWindow,
@@ -368,12 +415,17 @@ class CompanionRuntimeController(
 
     private suspend fun stopTv() = lifecycleMutex.withLock {
         stopPairing()
+        tvController?.onLocalPlaybackChanged()
+        tvLauncher?.stop()
         tvSessions.values.toList().forEach { it.close() }
         tvSessions.clear()
         tvServer?.stop()
         tvServer = null
         tvAuthenticator = null
         CompanionPlayerController.installReporter(null)
+        CompanionPlayerController.installTvNavigator(null)
+        tvController = null
+        tvLauncher = null
         nsd.stop()
         publishDevices()
     }
@@ -384,6 +436,9 @@ class CompanionRuntimeController(
     ) {
         val state = authenticator.take(connection.deviceId) ?: return
         val wire = TvRuntimeWire(connection, state.session.recordLayer)
+        val subscription = com.lagradost.cloudstream3.companion.tv.CompanionTvEventSubscription()
+        val wireSink = com.lagradost.cloudstream3.companion.tv.CompanionTvWireSessionSink(wire, subscription)
+        val sharedController = tvController ?: return
         lateinit var commandSession: CompanionTvCommandSession
         val playbackListener = object : CompanionGeneratorPlaybackListener {
             override fun onPlaybackState(
@@ -418,12 +473,10 @@ class CompanionRuntimeController(
                 scope.launch { commandSession.controller.onLocalPlaybackChanged() }
             }
         }
-        val launcher = tvAdapters.playbackFactory?.let {
-            CompanionPlaybackLauncher(it, nowPlaying, playbackListener = playbackListener)
-        } ?: UnavailableTvPlaybackLauncher
         commandSession = CompanionTvCommandSession(
             connection = wire,
-            launcher = launcher,
+            launcher = tvLauncher ?: UnavailableTvPlaybackLauncher,
+            sharedController = sharedController,
             keyHandler = tvAdapters.keyHandler,
             inputHandler = tvAdapters.inputHandler,
             openPageHandler = tvAdapters.openPageHandler,
@@ -439,7 +492,10 @@ class CompanionRuntimeController(
             trackSelectionHandler = tvAdapters.trackSelectionHandler,
             syncEngine = syncEngine,
             currentAccountNamespace = { DataStoreHelper.currentAccount },
+            sinkOverride = wireSink,
+            eventSubscriptionOverride = subscription,
         )
+        val sinkRegistration = tvSinks.register(connection.deviceId, wireSink)
         val registration = revocations.register(connection.deviceId) { connection.close() }
         val record = TvSessionRecord(connection, commandSession, registration)
         tvSessions[connection.deviceId]?.close()
@@ -455,6 +511,7 @@ class CompanionRuntimeController(
             commandSession.disconnect()
         } finally {
             registration.close()
+            sinkRegistration.close()
             tvSessions.remove(connection.deviceId, record)
             if (tvSessions.isEmpty()) CompanionUiBridge.setRemotePhoneName(null)
             publishDevices()
@@ -564,6 +621,16 @@ class CompanionRuntimeController(
         }
     }
 
+    /** Forwards app-background transitions to the phone session (phone role only). */
+    fun onAppBackgrounded() {
+        if (role == CompanionRuntimeRole.PHONE) phoneSession?.onAppBackground()
+    }
+
+    /** Forwards app-foreground transitions to the phone session (phone role only). */
+    fun onAppForegrounded() {
+        if (role == CompanionRuntimeRole.PHONE) phoneSession?.onAppForeground()
+    }
+
     private fun publishDevices() {
         val devices = if (role == CompanionRuntimeRole.TV) {
             keyStore.listPeers().map { peer ->
@@ -661,21 +728,31 @@ class CompanionRuntimeController(
 
     private fun formatHost(host: String): String = if (host.contains(':')) "[$host]" else host
 
-    private inner class PlayerReporter : CompanionPlayerController.Reporter {
+    private inner class PlayerReporter : CompanionPlayerController.Reporter,
+        CompanionNowPlayingReporter {
         private var activeOwner: com.lagradost.cloudstream3.ui.player.GeneratorPlayer? = null
-        private var activeLineageId: String? = null
+        private var activeLaunch: CompanionLaunchIdentity? = null
 
-        override fun register(owner: com.lagradost.cloudstream3.ui.player.GeneratorPlayer) {
+        override fun register(
+            owner: com.lagradost.cloudstream3.ui.player.GeneratorPlayer,
+            launch: CompanionLaunchIdentity?,
+        ) {
             activeOwner = owner
-            activeLineageId = nowPlaying.snapshot()?.lineageId
+            activeLaunch = launch
+            if (launch == null && role == CompanionRuntimeRole.TV) {
+                scope.launch { tvController?.onLocalPlaybackChanged() }
+            }
         }
 
         override fun unregister(owner: com.lagradost.cloudstream3.ui.player.GeneratorPlayer) {
             if (activeOwner !== owner) return
-            val lineageId = activeLineageId
+            val launch = activeLaunch
             activeOwner = null
-            activeLineageId = null
-            if (lineageId != null) nowPlaying.unregister(lineageId)
+            activeLaunch = null
+            if (launch != null) {
+                nowPlaying.unregister(launch.lineageId)
+                scope.launch { tvController?.onLocalPlaybackChanged() }
+            }
         }
 
         override fun onPlaybackState(
@@ -684,15 +761,49 @@ class CompanionRuntimeController(
             durationMs: Long,
             playing: Boolean,
         ) {
-            if (activeOwner !== owner) return
-            if (activeLineageId == null) return
+            val launch = activeLaunch
+            if (activeOwner !== owner || launch == null) return
             nowPlaying.onPlaybackState(
                 if (playing) com.lagradost.cloudstream3.companion.protocol.PlaybackStateKind.PLAYING
                 else com.lagradost.cloudstream3.companion.protocol.PlaybackStateKind.PAUSED,
                 positionMs,
                 durationMs,
             )
+            scope.launch {
+                if (tvController?.snapshot()?.lineageId != launch.lineageId) return@launch
+                tvController?.onPlaybackPosition(positionMs)
+                publishSyncPosition()
+            }
         }
+
+        override fun onPlaybackError(
+            owner: com.lagradost.cloudstream3.ui.player.GeneratorPlayer,
+            exception: Throwable,
+        ) {
+            val launch = activeLaunch
+            if (activeOwner !== owner || launch == null) return
+            val http = exception as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException
+            val status = http?.responseCode
+            scope.launch {
+                if (tvController?.snapshot()?.lineageId != launch.lineageId) return@launch
+                val snapshot = nowPlaying.snapshot()
+                val stage = if (status == 401 || status == 403) {
+                    StartupFailureStage.AUTH
+                } else if (snapshot == null || snapshot.durationMs <= 0L) {
+                    StartupFailureStage.MANIFEST
+                } else {
+                    StartupFailureStage.SEGMENT
+                }
+                tvController?.onRuntimePlaybackFailure(
+                    PlaybackStartFailure(stage = stage, httpStatus = status),
+                )
+            }
+        }
+
+        override fun register(lineageId: String, metadata: com.lagradost.cloudstream3.companion.tv.CompanionPlaybackMetadata) =
+            nowPlaying.register(lineageId, metadata)
+
+        override fun unregister(lineageId: String) = nowPlaying.unregister(lineageId)
     }
 
     private class TvSessionRecord(
@@ -743,7 +854,20 @@ object CompanionRuntime {
         role: CompanionRuntimeRole = detectRole(context),
         tvAdapters: CompanionTvRuntimeAdapters = CompanionTvRuntimeAdapters(),
     ): CompanionRuntimeController = synchronized(this) {
-        controller ?: CompanionRuntimeController(context, role, tvAdapters).also { controller = it }
+        if (controller != null) return@synchronized controller!!
+        val effectiveAdapters = if (
+            role == CompanionRuntimeRole.TV &&
+            tvAdapters.mainThread === ImmediateCompanionTvMainThreadDispatcher
+        ) {
+            tvAdapters.copy(
+                mainThread = com.lagradost.cloudstream3.companion.tv.CoroutineCompanionTvMainThreadDispatcher(
+                    Dispatchers.Main.immediate,
+                ),
+            )
+        } else {
+            tvAdapters
+        }
+        CompanionRuntimeController(context, role, effectiveAdapters).also { controller = it }
     }
 
     fun current(): CompanionRuntimeController? = controller

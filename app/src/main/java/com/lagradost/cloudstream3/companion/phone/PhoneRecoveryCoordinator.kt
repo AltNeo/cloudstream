@@ -27,6 +27,7 @@ fun interface PlayRequestSender {
 
 enum class RecoveryTerminalReason {
     RESOLUTION_FAILED,
+    DRM_ONLY,
     SEND_FAILED,
     RETRY_LIMIT,
     BUDGET_EXPIRED,

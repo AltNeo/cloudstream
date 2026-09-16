@@ -129,10 +129,14 @@ class CompanionTcpServer(
     private val serverSocketFactory: () -> ServerSocket = ::ServerSocket,
 ) : Closeable {
     private val lifecycleMutex = Mutex()
-    private val liveSockets = ConcurrentHashMap.newKeySet<Socket>()
+    // Collections.newSetFromMap (not ConcurrentHashMap.newKeySet) because newKeySet
+    // requires API 24 and minSdk is 23; semantics are the same concurrent set.
+    private val liveSockets =
+        java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Socket, Boolean>())
     private val addressCounts = ConcurrentHashMap<String, Int>()
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
+    @Volatile
     private var generation = 0L
     private var boundPort = 0
 
@@ -156,6 +160,10 @@ class CompanionTcpServer(
         } catch (error: Exception) {
             socket.close()
             throw error
+        }
+        if (generation != currentGeneration) {
+            socket.close()
+            throw CancellationException("companion server start superseded")
         }
         serverSocket = socket
         boundPort = socket.localPort
@@ -237,6 +245,10 @@ class CompanionTcpServer(
             socket.soTimeout = limits.handshakeTimeoutMs
             val deviceId = authenticator.authenticate(socket, limits.handshakeTimeoutMs)
             if (generation != loopGeneration) return
+            // Read-idle kill applies to every accepted socket, including
+            // event-subscribed ones: subscribed channels stay alive via the phone
+            // keepalive PING (PhoneCompanionSession KEEPALIVE_PING_INTERVAL_MS
+            // is shorter than idleTimeoutMs).
             socket.soTimeout = limits.idleTimeoutMs
             handler.handle(CompanionConnection(socket, deviceId))
         } catch (error: CancellationException) {
@@ -272,6 +284,7 @@ class CompanionTcpClient(
     private val lifecycleMutex = Mutex()
     private var connection: CompanionConnection? = null
     private var connectionJob: Job? = null
+    @Volatile
     private var generation = 0L
 
     suspend fun connect(endpoint: CompanionEndpoint): CompanionConnection = lifecycleMutex.withLock {

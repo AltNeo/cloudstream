@@ -264,9 +264,7 @@ class LinkResolutionPipeline(
         val results = completed.toList()
 
         if (results.isEmpty()) {
-            return@coroutineScope if (
-                !finished || clock.nowMs() - startedAt >= ASSEMBLY_BUDGET_MS
-            ) {
+            return@coroutineScope if (!finished) {
                 LinkResolutionOutcome.BudgetExpired
             } else {
                 LinkResolutionOutcome.NoCandidates(drmCount)
@@ -316,12 +314,13 @@ class LinkResolutionPipeline(
             )
         )
         val finalReferer = link.referer.takeIf { referer ->
-            referer.isNotBlank() && isSafeCompanionUrl(referer) &&
-                originOf(referer) == originOf(normalized.url)
+            referer.isNotBlank() && isSafeCompanionUrl(referer)
         }
-        val resolvedAudioTracks = link.audioTracks.map { audio ->
-            require(isSafeCompanionUrl(audio.url)) { "invalid audio track URL" }
-            ResolvedAudioTrack(audio.url, sanitizeCompanionHeaders(audio.headers.orEmpty()))
+        val resolvedAudioTracks = link.audioTracks.mapNotNull { audio ->
+            if (!isSafeCompanionUrl(audio.url)) return@mapNotNull null
+            runCatching {
+                ResolvedAudioTrack(audio.url, sanitizeCompanionHeaders(audio.headers.orEmpty()))
+            }.getOrNull()
         }
         val resolved = link.toResolvedLink(clock.nowMs()).copy(
             url = normalized.url,
@@ -362,7 +361,7 @@ class LinkResolutionPipeline(
         require(manifest.statusCode in 200..299)
         sensitiveHeadersAllowed = sensitiveHeadersAllowed &&
             originOf(url) == originOf(manifest.finalUrl)
-        val text = manifest.body.toString(Charsets.UTF_8)
+        val text = manifest.body.toString(Charsets.UTF_8).trimStart('\uFEFF')
         require(text.lineSequence().any { it.trim() == "#EXTM3U" })
 
         val lines = text.lines().map(String::trim)
@@ -372,12 +371,12 @@ class LinkResolutionPipeline(
         sensitiveHeadersAllowed = sensitiveHeadersAllowed &&
             originOf(manifest.finalUrl) == originOf(mediaUrl)
         val media = if (variant != null) {
-            request(mediaUrl, headers, fromUrl = manifest.finalUrl)
+            request(mediaUrl, headers)
         } else {
             manifest
         }
         require(media.statusCode in 200..299)
-        val mediaText = media.body.toString(Charsets.UTF_8)
+        val mediaText = media.body.toString(Charsets.UTF_8).trimStart('\uFEFF')
         require(mediaText.lineSequence().any { it.trim() == "#EXTM3U" })
         val segment = mediaText.lines().map(String::trim).firstOrNull {
             it.isNotEmpty() && !it.startsWith("#")
@@ -386,7 +385,7 @@ class LinkResolutionPipeline(
             val segmentUrl = resolveUrl(media.finalUrl, segment)
             sensitiveHeadersAllowed = sensitiveHeadersAllowed &&
                 originOf(media.finalUrl) == originOf(segmentUrl)
-            val segmentResponse = request(segmentUrl, headers, fromUrl = media.finalUrl)
+            val segmentResponse = request(segmentUrl, headers)
             require(segmentResponse.statusCode in 200..299)
         }
         return NormalizedProbe(manifest.finalUrl, sensitiveHeadersAllowed = sensitiveHeadersAllowed)
@@ -413,7 +412,6 @@ class LinkResolutionPipeline(
                 segmentUrl,
                 headers,
                 "bytes=0-1023",
-                fromUrl = manifest.finalUrl,
             )
             require(segment.statusCode in 200..299)
         }
@@ -441,7 +439,6 @@ class LinkResolutionPipeline(
                         part.url,
                         headers,
                         "bytes=0-1023",
-                        fromUrl = parts.first().url,
                     )
                     require(response.statusCode in 200..299)
                     sensitiveHeadersAllowed = sensitiveHeadersAllowed &&

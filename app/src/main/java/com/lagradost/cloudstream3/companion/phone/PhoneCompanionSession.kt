@@ -111,6 +111,9 @@ class PhoneCompanionSession(
     private var stopping = false
     private var activeInput: LinkResolutionInput? = null
     private var latestPositionMs: Long? = null
+    @Volatile
+    private var lastResolutionWasDrmOnly = false
+    private var keepaliveJob: Job? = null
 
     private val recovery = PhoneRecoveryCoordinator(
         scope = scope,
@@ -122,15 +125,36 @@ class PhoneCompanionSession(
                 startPositionMs = attempt.startPositionMs ?: input.startPositionMs,
             )
             when (val outcome = pipeline.resolve(adjusted)) {
-                is LinkResolutionOutcome.Success -> outcome.request
-                is LinkResolutionOutcome.NoCandidates,
-                LinkResolutionOutcome.BudgetExpired,
-                -> null
+                is LinkResolutionOutcome.Success -> {
+                    lastResolutionWasDrmOnly = false
+                    outcome.request
+                }
+                is LinkResolutionOutcome.NoCandidates -> {
+                    lastResolutionWasDrmOnly = outcome.droppedDrmLinks > 0 &&
+                        input.links.isNotEmpty() &&
+                        input.links.all { it is com.lagradost.cloudstream3.utils.DrmExtractorLink }
+                    null
+                }
+                LinkResolutionOutcome.BudgetExpired -> {
+                    lastResolutionWasDrmOnly = false
+                    null
+                }
             }
         },
         sender = PlayRequestSender { request -> sendPlay(request) },
         clock = clock,
-        onTerminalFailure = onTerminalFailure,
+        onTerminalFailure = { failure ->
+            val mapped = if (
+                failure.reason == RecoveryTerminalReason.RESOLUTION_FAILED &&
+                lastResolutionWasDrmOnly
+            ) {
+                failure.copy(reason = RecoveryTerminalReason.DRM_ONLY)
+            } else {
+                failure
+            }
+            lastResolutionWasDrmOnly = false
+            onTerminalFailure(mapped)
+        },
     )
 
     val sessionState: PhoneSessionState
@@ -159,6 +183,7 @@ class PhoneCompanionSession(
         stopping = true
         backgroundJob?.cancel()
         backgroundJob = null
+        stopKeepalive()
         reconnectLoop?.stop()
         reconnectLoop = null
         stopConnection()
@@ -175,6 +200,7 @@ class PhoneCompanionSession(
             if (sessionState != PhoneSessionState.CONNECTED && !stopping) {
                 reconnectLoop?.stop()
                 reconnectLoop = null
+                stopKeepalive()
                 setState(PhoneSessionState.DISCONNECTED)
             }
         }
@@ -215,6 +241,8 @@ class PhoneCompanionSession(
         sendCommand(MessageType.OPEN_PAGE, request)
 
     suspend fun unpair(): Boolean = sendCommand(MessageType.UNPAIR, null)
+
+    suspend fun sendPing(): Boolean = sendCommand(MessageType.PING, null)
 
     suspend fun subscribe(): Boolean = sendCommand(MessageType.SUBSCRIBE, null)
 
@@ -282,10 +310,27 @@ class PhoneCompanionSession(
         }
     }
 
+    private fun startKeepalive() {
+        stopKeepalive()
+        keepaliveJob = scope.launch {
+            while (true) {
+                delay(KEEPALIVE_PING_INTERVAL_MS)
+                if (sessionState != PhoneSessionState.CONNECTED) break
+                runCatching { sendPing() }
+            }
+        }
+    }
+
+    private fun stopKeepalive() {
+        keepaliveJob?.cancel()
+        keepaliveJob = null
+    }
+
     private suspend fun dialAndServe(endpoint: CompanionEndpoint) {
         val wire = dialer.dial(endpoint)
         connection = wire
         setState(PhoneSessionState.CONNECTED)
+        startKeepalive()
         try {
             coroutineScope {
                 val reader = launch(Dispatchers.IO) { readLoop(wire) }
@@ -294,6 +339,7 @@ class PhoneCompanionSession(
                 reader.join()
             }
         } finally {
+            stopKeepalive()
             stateMutex.withLock {
                 if (connection === wire) connection = null
             }
@@ -372,5 +418,6 @@ class PhoneCompanionSession(
     companion object {
         const val COMMAND_TIMEOUT_MS = 10_000L
         const val BACKGROUND_RECONNECT_GRACE_MS = 5 * 60_000L
+        const val KEEPALIVE_PING_INTERVAL_MS = 2 * 60_000L
     }
 }

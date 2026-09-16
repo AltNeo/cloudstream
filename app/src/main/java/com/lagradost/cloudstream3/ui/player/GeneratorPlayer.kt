@@ -1572,7 +1572,17 @@ class GeneratorPlayer : FullScreenPlayer() {
         }
     }
 
+    override fun playerVideoEnded(): Boolean {
+        // A companion remote session converts ENDED into a NAV_REQUESTED to the phone and
+        // suppresses local autoplay.
+        if (CompanionPlayerController.requestRemoteNavigation(
+                com.lagradost.cloudstream3.companion.protocol.NavigationDirection.NEXT)
+        ) return true
+        return super.playerVideoEnded()
+    }
+
     override fun playerError(exception: Throwable) {
+        CompanionPlayerController.reportPlaybackError(this, exception)
         currentSelectedLink?.let { link ->
             viewModel.modifyState { this.addError(link) }
         }
@@ -1687,6 +1697,9 @@ class GeneratorPlayer : FullScreenPlayer() {
     }
 
     override fun nextEpisode() {
+        if (companionOwnsNavigation(
+                com.lagradost.cloudstream3.companion.protocol.NavigationDirection.NEXT)
+        ) return
         if (viewModel.hasNextEpisode() == true) {
             isNextEpisode = true
             releasePlayer()
@@ -1695,12 +1708,20 @@ class GeneratorPlayer : FullScreenPlayer() {
     }
 
     override fun prevEpisode() {
+        if (companionOwnsNavigation(
+                com.lagradost.cloudstream3.companion.protocol.NavigationDirection.PREV)
+        ) return
         if (viewModel.hasPrevEpisode() == true) {
             isNextEpisode = true
             releasePlayer()
             viewModel.loadLinksPrev()
         }
     }
+
+    /** True when a companion remote session owns episode navigation (TV side). */
+    private fun companionOwnsNavigation(
+        direction: com.lagradost.cloudstream3.companion.protocol.NavigationDirection,
+    ): Boolean = CompanionPlayerController.requestRemoteNavigation(direction)
 
     private fun getNextLink(): DisplayLink? {
         val links = viewModel.state.sortLinks(currentQualityProfile)
@@ -2287,7 +2308,16 @@ class GeneratorPlayer : FullScreenPlayer() {
             return
         }
         viewModel.attachGenerator(generator, index)
-        CompanionPlayerController.register(this)
+        val companionLaunch = arguments?.let { args ->
+            val token = args.getString("companionLaunchToken")
+            val lineageId = args.getString("companionLineageId")
+            if (token != null && lineageId != null) {
+                com.lagradost.cloudstream3.companion.ui.CompanionLaunchIdentity(lineageId, token)
+            } else {
+                null
+            }
+        }
+        CompanionPlayerController.register(this, companionLaunch)
 
         context?.let { ctx ->
             val settingsManager = PreferenceManager.getDefaultSharedPreferences(ctx)

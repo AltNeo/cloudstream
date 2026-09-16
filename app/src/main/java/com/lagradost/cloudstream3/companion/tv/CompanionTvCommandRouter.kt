@@ -18,7 +18,6 @@ import com.lagradost.cloudstream3.companion.protocol.SelectSourceRequest
 import com.lagradost.cloudstream3.companion.protocol.SelectSubtitleRequest
 import com.lagradost.cloudstream3.companion.protocol.SyncRecordPayload
 import com.lagradost.cloudstream3.companion.protocol.SyncRequestPayload
-import com.lagradost.cloudstream3.companion.transport.CompanionConnection
 import com.lagradost.cloudstream3.companion.sync.CompanionSyncApplyResult
 import com.lagradost.cloudstream3.companion.sync.CompanionSyncEngine
 import com.lagradost.cloudstream3.companion.sync.CompanionSyncField
@@ -35,17 +34,6 @@ interface CompanionTvWireConnection {
     fun send(envelope: Envelope)
 }
 
-internal class CompanionTransportWireConnection(
-    private val connection: CompanionConnection,
-) : CompanionTvWireConnection {
-    override val deviceId: String
-        get() = connection.deviceId
-
-    override fun send(envelope: Envelope) {
-        connection.writeFrame(ProtocolJson.encodeEnvelope(envelope))
-    }
-}
-
 class CompanionTvEventSubscription {
     @Volatile
     var enabled: Boolean = false
@@ -55,7 +43,8 @@ class CompanionTvWireSessionSink(
     private val connection: CompanionTvWireConnection,
     val subscription: CompanionTvEventSubscription = CompanionTvEventSubscription(),
 ) : CompanionTvSessionSink {
-    override fun sendResult(requestId: String, result: ResultPayload) {
+    override fun sendResult(deviceId: String, requestId: String, result: ResultPayload) {
+        if (deviceId != connection.deviceId) return
         connection.send(
             Envelope(
                 id = requestId,
@@ -65,7 +54,8 @@ class CompanionTvWireSessionSink(
         )
     }
 
-    override fun sendEvent(event: Event) {
+    override fun sendEvent(deviceId: String, event: Event) {
+        if (deviceId != connection.deviceId) return
         if (!subscription.enabled) return
         connection.send(
             Envelope(
@@ -81,8 +71,11 @@ class CompanionTvWireSessionSink(
 
 /** Wires one authenticated connection to a TV controller with a matching event subscription. */
 class CompanionTvCommandSession(
-    connection: CompanionTvWireConnection,
+    private val connection: CompanionTvWireConnection,
     launcher: TvPlaybackLauncher,
+    sharedController: CompanionTvSessionController? = null,
+    sinkOverride: CompanionTvSessionSink? = null,
+    eventSubscriptionOverride: CompanionTvEventSubscription? = null,
     keyHandler: CompanionTvKeyHandler = NoOpCompanionTvKeyHandler,
     inputHandler: CompanionTvInputHandler = NoOpCompanionTvInputHandler,
     openPageHandler: CompanionTvOpenPageHandler = NoOpCompanionTvOpenPageHandler,
@@ -90,16 +83,20 @@ class CompanionTvCommandSession(
     onUnpairCleanup: suspend () -> Unit = {},
     onUnpairComplete: suspend () -> Unit = {},
     mainThread: CompanionTvMainThreadDispatcher = CoroutineCompanionTvMainThreadDispatcher(),
-    val eventSubscription: CompanionTvEventSubscription = CompanionTvEventSubscription(),
+    val eventSubscription: CompanionTvEventSubscription =
+        eventSubscriptionOverride ?: CompanionTvEventSubscription(),
     trackSelectionHandler: CompanionTvTrackSelectionHandler =
         NoOpCompanionTvTrackSelectionHandler,
     syncEngine: CompanionSyncEngine? = null,
     currentAccountNamespace: () -> String = { "0" },
 ) {
-    private val sink = CompanionTvWireSessionSink(connection, eventSubscription)
+    private val sink = sinkOverride ?: CompanionTvWireSessionSink(connection, eventSubscription)
     val trackCatalogPublisher: CompanionTvTrackCatalogPublisher =
-        CompanionTvEventTrackCatalogPublisher { event -> sendEvent(event) }
-    val controller = CompanionTvSessionController(launcher = launcher, sink = sink)
+        CompanionTvEventTrackCatalogPublisher { event ->
+            sink.sendEvent(connection.deviceId, event)
+        }
+    val controller: CompanionTvSessionController = sharedController
+        ?: CompanionTvSessionController(launcher = launcher, sink = sink)
     private val router = CompanionTvCommandRouter(
         connection = connection,
         controller = controller,
@@ -120,7 +117,7 @@ class CompanionTvCommandSession(
 
     suspend fun disconnect() = router.disconnect()
 
-    fun sendEvent(event: Event) = sink.sendEvent(event)
+    fun sendEvent(event: Event) = sink.sendEvent(connection.deviceId, event)
 }
 
 interface CompanionTvKeyHandler {

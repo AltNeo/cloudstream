@@ -86,6 +86,9 @@ class CompanionNsdManager(
             }
         }
         val listener = RegistrationListener(registrationGeneration.incrementAndGet())
+        registrationListener?.let {
+            runCatching { nsdManager.unregisterService(it) }
+        }
         registrationListener = listener
         nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, listener)
     }
@@ -96,6 +99,9 @@ class CompanionNsdManager(
         records.clear()
         notifyRecords()
         val listener = DiscoveryListener(currentGeneration)
+        discoveryListener?.let {
+            runCatching { nsdManager.stopServiceDiscovery(it) }
+        }
         discoveryListener = listener
         nsdManager.discoverServices(
             CompanionNsdRecords.SERVICE_TYPE,

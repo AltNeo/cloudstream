@@ -3,6 +3,7 @@ package com.lagradost.cloudstream3.companion.transport
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -18,6 +19,7 @@ class CompanionReconnectLoop(
     private val maxDelayMs: Long = 30_000L,
 ) {
     private val mutex = Mutex()
+    @Volatile
     private var generation = 0L
     private var job: Job? = null
 
@@ -28,8 +30,10 @@ class CompanionReconnectLoop(
             var backoffMs = initialDelayMs
             while (isActive && generation == currentGeneration) {
                 try {
+                    // A normal return means the dialer owns the connection lifetime and is
+                    // done; there is nothing left to retry, so leave instead of hot-spinning.
                     connect()
-                    backoffMs = initialDelayMs
+                    break
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {
@@ -41,9 +45,11 @@ class CompanionReconnectLoop(
         }
     }
 
-    suspend fun stop() = mutex.withLock {
-        ++generation
-        job?.cancel()
-        job = null
+    suspend fun stop() {
+        val jobToJoin = mutex.withLock {
+            ++generation
+            job?.also { it.cancel() }.also { job = null }
+        }
+        jobToJoin?.cancelAndJoin()
     }
 }

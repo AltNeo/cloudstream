@@ -127,6 +127,12 @@ class PlayerView @JvmOverloads constructor(
         fun nextMirror() {}
         fun onDownload(event: DownloadEvent) {}
         fun playerError(exception: Throwable) {}
+        /**
+         * Video playback reached its end. Return true to consume the event and suppress the
+         * default auto-advance (used by the phone⇄TV companion to request navigation from
+         * the controlling phone instead of resolving the next episode locally).
+         */
+        fun playerVideoEnded(): Boolean = false
         /** Called after [PlayerView] finishes its own player-attached setup (MediaSession, ExoPlayer view). */
         fun playerUpdated(player: Any?) {}
         /** Called on a short single-tap on empty player area (no swipe, no double-tap). */
@@ -772,12 +778,15 @@ class PlayerView @JvmOverloads constructor(
                 duration = event.durationMs
             )
             is VideoEndedEvent -> {
-                // Only play next episode if autoplay is on (default).
-                val ctx = context
-                if (PreferenceManager.getDefaultSharedPreferences(ctx)
-                        ?.getBoolean(ctx.getString(R.string.autoplay_next_key), true) == true
-                ) {
-                    player.handleEvent(CSPlayerEvent.NextEpisode, source = PlayerEventSource.Player)
+                // A callback (companion remote session) may consume ENDED.
+                if (callbacks?.playerVideoEnded() != true) {
+                    // Only play next episode if autoplay is on (default).
+                    val ctx = context
+                    if (PreferenceManager.getDefaultSharedPreferences(ctx)
+                            ?.getBoolean(ctx.getString(R.string.autoplay_next_key), true) == true
+                    ) {
+                        player.handleEvent(CSPlayerEvent.NextEpisode, source = PlayerEventSource.Player)
+                    }
                 }
             }
             is PauseEvent -> Unit

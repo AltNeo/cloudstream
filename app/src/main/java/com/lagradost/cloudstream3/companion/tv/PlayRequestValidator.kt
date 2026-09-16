@@ -18,6 +18,7 @@ private fun ResolvedLink.isValidForCompanion(): Boolean {
     if (playlist != null && url.isNotBlank() && !isHttpUrl(url)) return false
     if (playlist?.any { !isHttpUrl(it.url) } == true) return false
     if (!headers.keys.all(::isAllowedHeader)) return false
+    if (referer != null && !isHttpUrl(referer)) return false
     if (!audioTracks.all { track ->
             isHttpUrl(track.url) && track.headers.keys.all(::isAllowedHeader)
         }) return false
