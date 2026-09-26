@@ -4,6 +4,7 @@ import androidx.core.net.toUri
 import com.lagradost.cloudstream3.MainActivity.Companion.deleteFileOnExit
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
+import com.lagradost.cloudstream3.utils.SubtitleUtils.isSubtitleFile
 import okio.BufferedSource
 import okio.buffer
 import okio.sink
@@ -36,13 +37,19 @@ class SubtitleResource {
             var zipEntry = zipInputStream.nextEntry
 
             while (zipEntry != null) {
-                val tempFile = File.createTempFile("unzipped-subtitle", ".tmp").apply {
-                    deleteFileOnExit(this)
-                }
-                entries.add(zipEntry.name to tempFile)
+                val entryName = zipEntry.name
+                // Only expose actual subtitle files, preserving archive order and
+                // the original entry name. Directories and non-subtitle files are
+                // skipped before any temp file is created so nothing leaks.
+                if (!zipEntry.isDirectory && isSubtitleFile(entryName)) {
+                    val tempFile = File.createTempFile("unzipped-subtitle", ".tmp").apply {
+                        deleteFileOnExit(this)
+                    }
+                    entries.add(entryName to tempFile)
 
-                tempFile.sink().buffer().use { buffer ->
-                    buffer.writeAll(zipInputStream.source())
+                    tempFile.sink().buffer().use { buffer ->
+                        buffer.writeAll(zipInputStream.source())
+                    }
                 }
 
                 zipEntry = zipInputStream.nextEntry
