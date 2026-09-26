@@ -4,6 +4,7 @@ import androidx.core.net.toUri
 import com.lagradost.cloudstream3.MainActivity.Companion.deleteFileOnExit
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
+import com.lagradost.cloudstream3.utils.SubtitleUtils
 import okio.BufferedSource
 import okio.buffer
 import okio.sink
@@ -29,20 +30,29 @@ class SubtitleResource {
         return file
     }
 
-    private fun unzip(file: File): List<Pair<String, File>> {
+    /**
+     * Extracts the subtitle entries of [file] to temporary files, keeping the original entry
+     * names and their order in the archive.
+     *
+     * Directory entries and files that are not subtitles are ignored, so no temporary files are
+     * created for them.
+     */
+    internal fun unzip(file: File): List<Pair<String, File>> {
         val entries = mutableListOf<Pair<String, File>>()
 
         ZipInputStream(file.inputStream()).use { zipInputStream ->
             var zipEntry = zipInputStream.nextEntry
 
             while (zipEntry != null) {
-                val tempFile = File.createTempFile("unzipped-subtitle", ".tmp").apply {
-                    deleteFileOnExit(this)
-                }
-                entries.add(zipEntry.name to tempFile)
+                if (!zipEntry.isDirectory && SubtitleUtils.isSubtitleFileName(zipEntry.name)) {
+                    val tempFile = File.createTempFile("unzipped-subtitle", ".tmp").apply {
+                        deleteFileOnExit(this)
+                    }
+                    entries.add(zipEntry.name to tempFile)
 
-                tempFile.sink().buffer().use { buffer ->
-                    buffer.writeAll(zipInputStream.source())
+                    tempFile.sink().buffer().use { buffer ->
+                        buffer.writeAll(zipInputStream.source())
+                    }
                 }
 
                 zipEntry = zipInputStream.nextEntry
