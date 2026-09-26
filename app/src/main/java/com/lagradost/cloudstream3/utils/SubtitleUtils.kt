@@ -13,6 +13,14 @@ object SubtitleUtils {
         ".ttml", ".sbv", ".dfxp"
     )
 
+    /**
+     * Checks if [name] ends with one of the supported subtitle extensions.
+     * The comparison is case-insensitive, so both `.srt` and `.SRT` are accepted.
+     */
+    fun isSubtitleFile(name: String): Boolean {
+        return allowedExtensions.any { name.endsWith(it, ignoreCase = true) }
+    }
+
     fun deleteMatchingSubtitles(context: Context, info: DownloadObjects.DownloadedFileInfo) {
         val cleanDisplay = cleanDisplayName(info.displayName)
 
@@ -43,7 +51,7 @@ object SubtitleUtils {
         cleanDisplay: String
     ): Boolean {
         // Check if the file has a valid subtitle extension
-        val hasValidExtension = allowedExtensions.any { name.endsWith(it, ignoreCase = true) }
+        val hasValidExtension = isSubtitleFile(name)
 
         // We can't have the exact same file as a subtitle
         val isNotDisplayName = !name.equals(display, ignoreCase = true)

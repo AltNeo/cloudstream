@@ -4,6 +4,7 @@ import androidx.core.net.toUri
 import com.lagradost.cloudstream3.MainActivity.Companion.deleteFileOnExit
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
+import com.lagradost.cloudstream3.utils.SubtitleUtils
 import okio.BufferedSource
 import okio.buffer
 import okio.sink
@@ -29,13 +30,20 @@ class SubtitleResource {
         return file
     }
 
-    private fun unzip(file: File): List<Pair<String, File>> {
+    internal fun unzip(file: File): List<Pair<String, File>> {
         val entries = mutableListOf<Pair<String, File>>()
 
         ZipInputStream(file.inputStream()).use { zipInputStream ->
             var zipEntry = zipInputStream.nextEntry
 
             while (zipEntry != null) {
+                // Only actual subtitle files should be exposed to the player, anything
+                // else (folders, videos, images, ...) is skipped without creating a file.
+                if (zipEntry.isDirectory || !SubtitleUtils.isSubtitleFile(zipEntry.name)) {
+                    zipEntry = zipInputStream.nextEntry
+                    continue
+                }
+
                 val tempFile = File.createTempFile("unzipped-subtitle", ".tmp").apply {
                     deleteFileOnExit(this)
                 }
